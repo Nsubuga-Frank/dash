@@ -1,0 +1,4440 @@
+import { getAuth, onAuthStateChanged } from 'firebase/auth';
+import { addDoc, collection, doc, getDocs, orderBy, query, serverTimestamp, updateDoc, where, writeBatch } from 'firebase/firestore';
+import {
+    AlertTriangle,
+    ChevronDown,
+    Copy,
+    Folder,
+    Link,
+    Plus,
+    PlusIcon,
+    Save,
+    Trash2,
+    X
+} from 'lucide-react';
+import PropTypes from 'prop-types';
+import { useEffect, useRef, useState } from 'react';
+import { toast } from 'react-toastify';
+import modelsData from '../data/models.json';
+import db from '../screens/firebase/config';
+import ModelDeployPanel from './ModelDeployPanel';
+
+/**
+ * ModelReadbuddy
+ * 
+ * This version defines its own local states for chat messages,
+ * projects, user input, etc., so you don't need to pass them
+ * from the parent.
+ */
+const ModelReadbuddy = ({
+  darkMode,
+}) => {
+  //
+  // 1) Local states for chat + playground
+  //
+  const [projects, setProjects] = useState([]);
+  const [chatHistory, setChatHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingProject, setLoadingProject] = useState(false);
+  const [loadingChat, setLoadingChat] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [showNewProjectInput, setShowNewProjectInput] = useState(false);
+
+  // Add state for selected document
+  const [selectedDocument, setSelectedDocument] = useState(null);
+
+  // Firebase auth
+  const auth = getAuth();
+  const [userId, setUserId] = useState(null);
+  // eslint-disable-next-line no-unused-vars
+  const [userInfo, setUserInfo] = useState(null);
+  // eslint-disable-next-line no-unused-vars
+  const [loggedIn, setLoggedIn] = useState(false);
+
+  // Example chat messages: each message has {role, content}
+  const [chatMessages, setChatMessages] = useState([]);
+  // Message cache to store messages for each chat
+  const [messageCache, setMessageCache] = useState({});
+  // Current chat ID to track which chat we're viewing - state only needed for the setter
+  // eslint-disable-next-line no-unused-vars
+  const [currentChatId, setCurrentChatId] = useState(null);
+
+  const [userInput, setUserInput] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  // Example model settings
+  const [playgroundModel, setPlaygroundModel] = useState({
+    name: 'meta-llama-3.1-8b-instruct'
+  });
+  // Add state for right panel collapse
+  const [rightPanelExpanded, setRightPanelExpanded] = useState(true);
+  
+  // Add state for model selection dropdown
+  const [modelDropdownVisible, setModelDropdownVisible] = useState(false);
+  const [modelSearchQuery, setModelSearchQuery] = useState('');
+  const [modelTypeFilter, setModelTypeFilter] = useState('all');
+  const [showModelTypeDropdown, setShowModelTypeDropdown] = useState(false);
+  
+  // Add state to track expanded libraries
+  const [expandedLibraries, setExpandedLibraries] = useState(['library-1']);
+  
+  // Model deployment state
+  const [showDeployPanel, setShowDeployPanel] = useState(false);
+  const [selectedModelToDeploy, setSelectedModelToDeploy] = useState(null);
+  const [deployedModels, setDeployedModels] = useState([
+    { id: '1', name: 'meta-llama-3.1-8b-instruct', type: 'llama', status: 'deployed' },
+    { id: '4', name: 'claude-3-opus', type: 'claude', status: 'deployed' },
+    { id: '6', name: 'llama-2-13b', type: 'llama', status: 'deployed' },
+    { id: '8', name: 'mixtral-8x7b', type: 'mixtral', status: 'deployed' }
+  ]);
+  
+  // Load models from models.json
+  const [availableModels, setAvailableModels] = useState([]);
+  
+  useEffect(() => {
+    // Use the imported models data from JSON file
+    const models = modelsData.models.map(model => ({
+      id: model.id,
+      name: model.name,
+      type: model.brand.toLowerCase(),
+      status: 'available',
+      parameters: model.parameters,
+      requirements: model.requirements,
+      size: model.size
+    }));
+    setAvailableModels(models);
+  }, []);
+  
+  // Model type options
+  const modelTypes = [
+    { id: 'all', name: 'All Models' },
+    { id: 'llama', name: 'Llama' },
+    { id: 'deepseek', name: 'DeepSeek' },
+    { id: 'gemma', name: 'Gemma' },
+    { id: 'qwen', name: 'Qwen' }
+  ];
+  
+  // Ref for model dropdown and model type dropdown
+  const modelDropdownRef = useRef(null);
+  const modelTypeDropdownRef = useRef(null);
+  
+  // Function to toggle model dropdown
+  const toggleModelDropdown = () => {
+    setModelDropdownVisible(!modelDropdownVisible);
+    setShowModelTypeDropdown(false);
+  };
+  
+  // Function to toggle model type dropdown
+  const toggleModelTypeDropdown = (e) => {
+    e.stopPropagation();
+    setShowModelTypeDropdown(!showModelTypeDropdown);
+  };
+  
+  // Function to select a model type
+  const selectModelType = (type) => {
+    setModelTypeFilter(type);
+    setShowModelTypeDropdown(false);
+  };
+  
+  // Function to select a model
+  const selectModel = (model) => {
+    setPlaygroundModel(model);
+    setModelDropdownVisible(false);
+  };
+  
+  // Function to handle model deployment
+  const handleDeployModel = (model) => {
+    setSelectedModelToDeploy(model);
+    setShowDeployPanel(true);
+    setModelDropdownVisible(false);
+  };
+  
+  // Function to handle deployment completion
+  const handleModelDeployed = (result) => {
+    if (result && result.success) {
+      // Add the newly deployed model to deployedModels
+      setDeployedModels(prev => [...prev, {
+        ...selectedModelToDeploy,
+        status: 'deployed'
+      }]);
+      
+      // Select the newly deployed model
+      setPlaygroundModel(selectedModelToDeploy);
+      
+      toast.success(`Model ${selectedModelToDeploy.name} deployed successfully!`);
+    }
+    return { success: true };
+  };
+
+  // Close dropdowns when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(event.target)) {
+        setModelDropdownVisible(false);
+      }
+      if (
+        modelTypeDropdownRef.current && 
+        !modelTypeDropdownRef.current.contains(event.target) &&
+        event.target.id !== 'model-type-button'
+      ) {
+        setShowModelTypeDropdown(false);
+      }
+    };
+    
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  // Check if a model is deployed
+  const isModelDeployed = (modelId) => {
+    return deployedModels.some(m => m.id === modelId);
+  };
+
+  // Filtered models based on search, model type, and deployment status
+  const filteredModels = availableModels.filter(model => {
+    // Type filter check
+    const typeMatch = modelTypeFilter === 'all' || model.type === modelTypeFilter;
+    
+    // Search filter check
+    const searchMatch = modelSearchQuery.trim() === '' || 
+      model.name.toLowerCase().includes(modelSearchQuery.toLowerCase());
+    
+    return typeMatch && searchMatch;
+  });
+
+  // Ref to scroll chat into view
+  const messagesEndRef = useRef(null);
+  const newProjectInputRef = useRef(null);
+
+  // Add state for confirmation dialog
+  const [deleteConfirmation, setDeleteConfirmation] = useState({
+    isOpen: false,
+    type: null, // 'project' or 'chat'
+    itemId: null,
+    itemName: '',
+    isDeleting: false
+  });
+
+  // Add state for panel sizes
+  const [panelSizes, setPanelSizes] = useState({
+    left: 192, // w-48 is 12rem or 192px
+    right: rightPanelExpanded ? 288 : 40 // w-72 is 18rem or 288px, collapsed is 40px
+  });
+
+  // Add refs for resize handling
+  const leftPanelRef = useRef(null);
+  const middlePanelRef = useRef(null);
+  const rightPanelRef = useRef(null);
+  const leftResizeRef = useRef(null);
+  const rightResizeRef = useRef(null);
+
+  //
+  // 2) Firebase integration
+  //
+  
+  // Check auth state changes to load projects when user signs in
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setUserId(user.uid);
+        setUserInfo({
+          displayName: user.displayName || "User",
+          email: user.email,
+          photoURL: user.photoURL || "/img/avatar.png",
+        });
+        setLoggedIn(true);
+        
+        // Load user libraries when authenticated
+        fetchUserLibraries(user.uid);
+      } else {
+        setLoggedIn(false);
+        setUserId(null);
+        setUserInfo(null);
+        
+        // Reset libraries when signed out
+        setUserLibraries([]);
+        setExpandedLibraries([]);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+  
+  // Fetch projects and chat history on component mount
+  // eslint-disable-next-line no-unused-vars
+  const fetchProjects = async (userIdParam) => {
+    const currentUserId = userIdParam || userId;
+    if (!currentUserId) return;
+    
+    setLoading(true);
+    try {
+      const projectsRef = collection(db, 'playground_projects');
+      const q = query(
+        projectsRef,
+        where('userId', '==', currentUserId),
+        orderBy('createdAt', 'desc')
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const fetchedProjects = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        expanded: false
+      }));
+      
+      // Default expand the first project if there is one
+      if (fetchedProjects.length > 0) {
+        fetchedProjects[0].expanded = true;
+        setProjects(fetchedProjects);
+        
+        // Fetch chats for this project
+        await fetchChats(fetchedProjects[0].id, currentUserId);
+      } else {
+        setProjects([]);
+        setChatHistory([]);
+      }
+      
+      // If no projects, show create project input
+      if (fetchedProjects.length === 0) {
+        setShowNewProjectInput(true);
+      }
+    } catch (error) {
+      console.error("Error fetching projects:", error);
+      toast.error("Failed to load projects");
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Fetch chats for a specific project
+  const fetchChats = async (projectId, userIdParam) => {
+    const currentUserId = userIdParam || userId;
+    if (!currentUserId || !projectId) return;
+    
+    try {
+      // Clear chat history before fetching new chats to avoid duplicates
+      setChatHistory([]);
+      setChatMessages([]);
+      
+      const chatsRef = collection(db, 'playground_chats');
+      const q = query(
+        chatsRef,
+        where('userId', '==', currentUserId),
+        where('projectId', '==', projectId),
+        orderBy('createdAt', 'desc')
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const fetchedChats = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        projectId: projectId, // Explicitly store projectId in the chat object
+        selected: false
+      }));
+      
+      // Select the first chat if available
+      if (fetchedChats.length > 0) {
+        fetchedChats[0].selected = true;
+        setChatHistory(fetchedChats);
+        
+        // Set current chat ID
+        setCurrentChatId(fetchedChats[0].id);
+        
+        // Fetch messages for this chat
+        await fetchMessages(fetchedChats[0].id, currentUserId);
+      } else {
+        setChatHistory([]);
+        setChatMessages([]);
+        
+        // Create a default chat if there are no chats
+        if (projects.find(p => p.id === projectId)) {
+          await handleCreateChat(projectId, "New Chat");
+        }
+      }
+    } catch (error) {
+      console.error("Error fetching chats:", error);
+      toast.error("Failed to load chats");
+    }
+  };
+  
+  // Fetch messages for a specific chat
+  const fetchMessages = async (chatId, userIdParam) => {
+    const currentUserId = userIdParam || userId;
+    if (!currentUserId || !chatId) return;
+    
+    try {
+      // Check if we already have messages in the cache
+      if (messageCache[chatId] && messageCache[chatId].length > 0) {
+        // Use cached messages first for instant display
+        setChatMessages(messageCache[chatId]);
+        
+        // Still show loading but with existing messages
+        setIsProcessing(true);
+      } else {
+        // No cached messages, show loading state and clear messages
+        setIsProcessing(true);
+        setChatMessages([]);
+      }
+      
+      // Fetch from Firebase
+      const messagesRef = collection(db, 'playground_messages');
+      const q = query(
+        messagesRef,
+        where('chatId', '==', chatId),
+        orderBy('createdAt', 'asc')
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const fetchedMessages = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      
+      // Update cache with new messages
+      setMessageCache(prev => ({
+        ...prev,
+        [chatId]: fetchedMessages
+      }));
+      
+      // Update chat messages
+      setChatMessages(fetchedMessages);
+      setIsProcessing(false);
+    } catch (error) {
+      console.error("Error fetching messages:", error);
+      toast.error("Failed to load chat messages");
+      setIsProcessing(false);
+    }
+  };
+  
+  // Create a new project
+  const handleCreateProject = async () => {
+    if (!userId || !newProjectName.trim()) return;
+    
+    setLoadingProject(true);
+    try {
+      const projectData = {
+        userId,
+        name: newProjectName.trim(),
+        createdAt: serverTimestamp()
+      };
+      
+      const docRef = await addDoc(collection(db, 'playground_projects'), projectData);
+      
+      // Add to local state
+      const newProject = {
+        id: docRef.id,
+        ...projectData,
+        createdAt: new Date(),
+        expanded: true
+      };
+      
+      // Collapse all other projects
+      const updatedProjects = projects.map(p => ({ ...p, expanded: false }));
+      setProjects([newProject, ...updatedProjects]);
+      
+      // Reset input
+      setNewProjectName('');
+      setShowNewProjectInput(false);
+      
+      // Create a default chat for this project
+      await handleCreateChat(docRef.id, "New Chat");
+    } catch (error) {
+      console.error("Error creating project:", error);
+      toast.error("Failed to create project");
+    } finally {
+      setLoadingProject(false);
+    }
+  };
+  
+  // Create a new chat
+  const handleCreateChat = async (projectId, name = "New Chat") => {
+    if (!userId || !projectId) return;
+    
+    setLoadingChat(true);
+    try {
+      const chatData = {
+        userId,
+        projectId,
+        name,
+        createdAt: serverTimestamp()
+      };
+      
+      const docRef = await addDoc(collection(db, 'playground_chats'), chatData);
+      
+      // Add to local state
+      const newChat = {
+        id: docRef.id,
+        ...chatData,
+        createdAt: new Date(),
+        selected: true
+      };
+      
+      // Deselect all other chats
+      const updatedChats = chatHistory.map(c => ({ ...c, selected: false }));
+      setChatHistory([newChat, ...updatedChats]);
+      
+      // Clear messages
+      setChatMessages([]);
+      
+      return docRef.id;
+    } catch (error) {
+      console.error("Error creating chat:", error);
+      toast.error("Failed to create chat");
+    } finally {
+      setLoadingChat(false);
+    }
+  };
+
+  // Generate a chat name from the first message
+  const generateChatName = (message) => {
+    // Get first 30 characters of the message
+    const truncated = message.slice(0, 30);
+    
+    // If the message is shorter than 30 chars, use it as is
+    // Otherwise add ellipsis
+    const baseName = truncated.length < 30 ? truncated : `${truncated}...`;
+    
+    // Remove special characters, make it title case
+    return baseName
+      .replace(/[^\w\s]/gi, '')
+      .trim()
+      .split(' ')
+      .filter(word => word.length > 0)
+      .slice(0, 4)
+      .join(' ');
+  };
+
+  // Update chat name in Firebase and local state
+  const updateChatName = async (chatId, newName) => {
+    if (!userId || !chatId) return;
+    
+    try {
+      // Update in Firebase
+      const chatRef = doc(db, 'playground_chats', chatId);
+      await updateDoc(chatRef, { name: newName });
+      
+      // Update in local state
+      setChatHistory(prev => 
+        prev.map(chat => 
+          chat.id === chatId ? { ...chat, name: newName } : chat
+        )
+      );
+    } catch (error) {
+      console.error("Error updating chat name:", error);
+      toast.error("Failed to update chat name");
+    }
+  };
+
+  //
+  // 3) Handlers
+  //
+  const handleSendMessage = async () => {
+    if (!userInput.trim()) return;
+    
+    // Get selected chat ID or active project to create new chat
+    const selectedChat = chatHistory.find(c => c.selected);
+    const activeProject = projects.find(p => p.expanded);
+    
+    // If no active project, show error
+    if (!activeProject) {
+      toast.error("Please create or select a project first");
+      return;
+    }
+
+    let currentChatId = selectedChat?.id;
+    let isFirstMessage = false;
+    
+    // If no chat is selected, create a new chat
+    if (!currentChatId) {
+      currentChatId = await handleCreateChat(activeProject.id);
+      isFirstMessage = true;
+      
+      // Set current chat ID for the new chat
+      setCurrentChatId(currentChatId);
+    }
+    
+    setIsProcessing(true);
+
+    try {
+      // Create user message in Firebase
+      const userMessageData = {
+        chatId: currentChatId,
+        role: 'user',
+        content: userInput,
+        createdAt: serverTimestamp()
+      };
+      
+      const userMsgRef = await addDoc(collection(db, 'playground_messages'), userMessageData);
+      
+      // Add to local state
+      const userMsg = {
+        id: userMsgRef.id,
+        ...userMessageData,
+        createdAt: new Date()
+      };
+      
+      // Update chat messages and cache
+      const updatedMessages = [...chatMessages, userMsg];
+      setChatMessages(updatedMessages);
+      setMessageCache(prev => ({
+      ...prev,
+        [currentChatId]: updatedMessages
+      }));
+      
+    setUserInput('');
+
+      // If this is the first message in the chat, auto-generate a name
+      if (isFirstMessage || chatMessages.length === 0) {
+        const generatedName = generateChatName(userInput);
+        await updateChatName(currentChatId, generatedName);
+      }
+
+    // Simulate AI response (fake 1-second delay)
+      // In a real app, you'd call your backend/API here
+      setTimeout(async () => {
+        // Create assistant message in Firebase
+        const assistantMessageData = {
+          chatId: currentChatId,
+          role: 'assistant',
+          model: 'meta-llama-3.1-8b-instruct',
+          content: `Implementation\n\n\`\`\`\n#include <iostream>\n#include <fstream>\n#include <string>\n#include <map>\n\n// Forward declarations\nclass FileSystem;\nclass Directory;\nclass File;\n\n// Abstract base class for File System components (Directory/File)\nclass FileSystemComponent {\npublic:\n    virtual ~FileSystemComponent() {}\n\`\`\``,
+          createdAt: serverTimestamp()
+        };
+        
+        const assistantMsgRef = await addDoc(collection(db, 'playground_messages'), assistantMessageData);
+        
+        // Add to local state
+        const assistantMsg = {
+          id: assistantMsgRef.id,
+          ...assistantMessageData,
+          createdAt: new Date()
+        };
+        
+        // Update both chat messages and cache
+        const finalMessages = [...updatedMessages, assistantMsg];
+        setChatMessages(finalMessages);
+        setMessageCache(prev => ({
+          ...prev,
+          [currentChatId]: finalMessages
+        }));
+        
+      setIsProcessing(false);
+    }, 1000);
+    } catch (error) {
+      console.error("Error sending message:", error);
+      toast.error("Failed to send message");
+      setIsProcessing(false);
+    }
+  };
+
+  const handleNewChat = async () => {
+    // Find the active project
+    const activeProject = projects.find(p => p.expanded);
+    
+    if (!activeProject) {
+      toast.error("Please create or select a project first");
+      return;
+    }
+    
+    // Create a new chat in the active project
+    await handleCreateChat(activeProject.id);
+  };
+
+  const handleClearChat = async () => {
+    // Get selected chat ID
+    const selectedChat = chatHistory.find(c => c.selected);
+    if (!selectedChat) return;
+    
+    try {
+      // Get all messages for this chat
+      const messagesRef = collection(db, 'playground_messages');
+      const q = query(
+        messagesRef,
+        where('chatId', '==', selectedChat.id)
+      );
+      
+      const querySnapshot = await getDocs(q);
+      
+      // Create a batch for performance
+      const batch = writeBatch(db);
+      
+      // Add delete operations to batch
+      querySnapshot.docs.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      
+      // Commit the batch
+      await batch.commit();
+      
+      // Clear local state and cache
+    setChatMessages([]);
+      setMessageCache(prev => ({
+        ...prev,
+        [selectedChat.id]: []
+      }));
+      
+      toast.success("Chat cleared successfully");
+    } catch (error) {
+      console.error("Error clearing chat:", error);
+      toast.error("Failed to clear chat");
+    }
+  };
+
+  const handleSaveChat = async () => {
+    // Get selected chat ID
+    const selectedChat = chatHistory.find(c => c.selected);
+    if (!selectedChat) {
+      toast.error("No chat selected to save");
+      return;
+    }
+    
+    try {
+      // Update the chat in Firebase to mark it as saved
+      const chatRef = doc(db, 'playground_chats', selectedChat.id);
+      await updateDoc(chatRef, { 
+        saved: true,
+        lastSavedAt: serverTimestamp()
+      });
+      
+      // Update local state
+      setChatHistory(prev => 
+        prev.map(chat => 
+          chat.id === selectedChat.id 
+            ? { ...chat, saved: true, lastSavedAt: new Date() } 
+            : chat
+        )
+      );
+      
+      toast.success("Chat saved successfully");
+    } catch (error) {
+      console.error("Error saving chat:", error);
+      toast.error("Failed to save chat");
+    }
+  };
+
+  const handleChatSelect = async (chatId) => {
+    // Skip if already selected
+    const currentSelected = chatHistory.find(c => c.selected);
+    if (currentSelected?.id === chatId) return;
+    
+    // Find the chat to select 
+    const chatToSelect = chatHistory.find(c => c.id === chatId);
+    if (!chatToSelect) return;
+    
+    // Track the current chat ID
+    setCurrentChatId(chatId);
+    
+    // Mark that chat as selected
+    setChatHistory((prev) =>
+      prev.map((c) => ({
+        ...c,
+        selected: c.id === chatId
+      }))
+    );
+    
+    // Fetch messages for this chat
+    await fetchMessages(chatId);
+  };
+
+  // Expand/collapse a project
+  const toggleProject = async (projectId) => {
+    const projectToToggle = projects.find(p => p.id === projectId);
+    
+    if (!projectToToggle) return;
+    
+    // If already expanded, just collapse it
+    if (projectToToggle.expanded) {
+    setProjects((prev) =>
+      prev.map((p) =>
+          p.id === projectId ? { ...p, expanded: false } : p
+        )
+      );
+      return;
+    }
+    
+    // Otherwise collapse all projects first, then expand the selected one
+    setProjects((prev) =>
+      prev.map((p) =>
+        p.id === projectId ? { ...p, expanded: true } : { ...p, expanded: false }
+      )
+    );
+    
+    // Fetch chats for this project
+    await fetchChats(projectId);
+  };
+
+  // Focus new project input when shown
+  useEffect(() => {
+    if (showNewProjectInput && newProjectInputRef.current) {
+      newProjectInputRef.current.focus();
+    }
+  }, [showNewProjectInput]);
+
+  //
+  // 4) Scroll to bottom of chat on new messages
+  //
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
+  // Add function to delete a project
+  const handleDeleteProject = async (projectId) => {
+    if (!userId || !projectId) return;
+    
+    try {
+      // Set deleting state
+      setDeleteConfirmation(prev => ({
+        ...prev,
+        isDeleting: true
+      }));
+      
+      // Get all chats for this project first
+      const chatsRef = collection(db, 'playground_chats');
+      const chatsQuery = query(
+        chatsRef,
+        where('userId', '==', userId),
+        where('projectId', '==', projectId)
+      );
+      
+      const chatsSnapshot = await getDocs(chatsQuery);
+      const chatIds = chatsSnapshot.docs.map(doc => doc.id);
+      
+      // Get all messages for these chats
+      const messagesPromises = chatIds.map(async (chatId) => {
+        const messagesRef = collection(db, 'playground_messages');
+        const messagesQuery = query(
+          messagesRef,
+          where('chatId', '==', chatId)
+        );
+        return getDocs(messagesQuery);
+      });
+      
+      const messagesSnapshots = await Promise.all(messagesPromises);
+      
+      // Create a batch for all deletions
+      const batch = writeBatch(db);
+      
+      // Add all messages to batch delete
+      messagesSnapshots.forEach(snapshot => {
+        snapshot.docs.forEach(doc => {
+          batch.delete(doc.ref);
+        });
+      });
+      
+      // Add all chats to batch delete
+      chatsSnapshot.docs.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      
+      // Add project to batch delete
+      const projectRef = doc(db, 'playground_projects', projectId);
+      batch.delete(projectRef);
+      
+      // Commit all deletes in one batch
+      await batch.commit();
+      
+      // Update local state to remove the project
+      setProjects(prev => prev.filter(p => p.id !== projectId));
+      
+      // If this was the expanded project, clear chat history
+      if (projects.find(p => p.id === projectId && p.expanded)) {
+        setChatHistory([]);
+        setChatMessages([]);
+      }
+      
+      toast.success("Project deleted successfully");
+      
+      // Close confirmation dialog
+      setDeleteConfirmation({
+        isOpen: false,
+        type: null,
+        itemId: null,
+        itemName: '',
+        isDeleting: false
+      });
+    } catch (error) {
+      console.error("Error deleting project:", error);
+      toast.error("Failed to delete project");
+      
+      // Reset deleting state
+      setDeleteConfirmation(prev => ({
+        ...prev,
+        isDeleting: false
+      }));
+    }
+  };
+
+  // Add function to delete a chat
+  const handleDeleteChat = async (chatId) => {
+    if (!userId || !chatId) return;
+    
+    try {
+      // Set deleting state
+      setDeleteConfirmation(prev => ({
+        ...prev,
+        isDeleting: true
+      }));
+      
+      // Get all messages for this chat
+      const messagesRef = collection(db, 'playground_messages');
+      const messagesQuery = query(
+        messagesRef,
+        where('chatId', '==', chatId)
+      );
+      
+      const messagesSnapshot = await getDocs(messagesQuery);
+      
+      // Create a batch for all deletions
+      const batch = writeBatch(db);
+      
+      // Add all messages to batch delete
+      messagesSnapshot.docs.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      
+      // Add chat to batch delete
+      const chatRef = doc(db, 'playground_chats', chatId);
+      batch.delete(chatRef);
+      
+      // Commit all deletes in one batch
+      await batch.commit();
+      
+      // Update local state
+      const deletedChat = chatHistory.find(c => c.id === chatId);
+      const wasSelected = deletedChat?.selected;
+      
+      // Remove from chat history
+      setChatHistory(prev => {
+        const filtered = prev.filter(c => c.id !== chatId);
+        
+        // If this was the selected chat, select another one if available
+        if (wasSelected && filtered.length > 0) {
+          filtered[0].selected = true;
+          
+          // Also load the messages for the newly selected chat
+          fetchMessages(filtered[0].id);
+        } else if (wasSelected) {
+          // If there are no chats left, clear messages
+          setChatMessages([]);
+        }
+        
+        return filtered;
+      });
+      
+      // If this was the selected chat, clear message cache
+      if (wasSelected) {
+        setMessageCache(prev => {
+          const newCache = { ...prev };
+          delete newCache[chatId];
+          return newCache;
+        });
+      }
+      
+      toast.success("Chat deleted successfully");
+      
+      // Close confirmation dialog
+      setDeleteConfirmation({
+        isOpen: false,
+        type: null,
+        itemId: null,
+        itemName: '',
+        isDeleting: false
+      });
+    } catch (error) {
+      console.error("Error deleting chat:", error);
+      toast.error("Failed to delete chat");
+      
+      // Reset deleting state
+      setDeleteConfirmation(prev => ({
+        ...prev,
+        isDeleting: false
+      }));
+    }
+  };
+
+  // Add function to show confirmation dialog
+  const showDeleteConfirmation = (type, id, name) => {
+    setDeleteConfirmation({
+      isOpen: true,
+      type,
+      itemId: id,
+      itemName: name
+    });
+  };
+
+  // Add function to handle confirmation
+  const handleConfirmDelete = () => {
+    const { type, itemId } = deleteConfirmation;
+    
+    if (type === 'project') {
+      handleDeleteProject(itemId);
+    } else if (type === 'chat') {
+      handleDeleteChat(itemId);
+    }
+  };
+
+  // Add function to cancel deletion
+  const cancelDelete = () => {
+    setDeleteConfirmation({
+      isOpen: false,
+      type: null,
+      itemId: null,
+      itemName: '',
+      isDeleting: false
+    });
+  };
+
+  // Add resize handlers
+  useEffect(() => {
+    const handleLeftResize = (e) => {
+      if (!leftResizeRef.current?.dataset.resizing) return;
+      
+      const newWidth = Math.max(150, Math.min(400, e.clientX));
+      setPanelSizes(prev => ({
+        ...prev,
+        left: newWidth
+      }));
+    };
+    
+    const handleRightResize = (e) => {
+      if (!rightResizeRef.current?.dataset.resizing) return;
+      if (!rightPanelExpanded) return;
+      
+      const containerWidth = document.querySelector('.flex.w-full.h-full')?.clientWidth || 1200;
+      const newRightWidth = Math.max(250, Math.min(500, containerWidth - e.clientX));
+      setPanelSizes(prev => ({
+        ...prev,
+        right: newRightWidth
+      }));
+    };
+    
+    const handleMouseUp = () => {
+      if (leftResizeRef.current) {
+        leftResizeRef.current.dataset.resizing = '';
+      }
+      if (rightResizeRef.current) {
+        rightResizeRef.current.dataset.resizing = '';
+      }
+      document.body.style.cursor = 'default';
+      document.body.style.userSelect = '';
+    };
+    
+    document.addEventListener('mousemove', handleLeftResize);
+    document.addEventListener('mousemove', handleRightResize);
+    document.addEventListener('mouseup', handleMouseUp);
+    
+    return () => {
+      document.removeEventListener('mousemove', handleLeftResize);
+      document.removeEventListener('mousemove', handleRightResize);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [rightPanelExpanded]);
+
+  // Update rightPanelExpanded effect to adjust panel size
+  useEffect(() => {
+    setPanelSizes(prev => ({
+      ...prev,
+      right: rightPanelExpanded ? 288 : 40
+    }));
+  }, [rightPanelExpanded]);
+
+  // Function to toggle library expansion
+  const toggleLibrary = (libraryId) => {
+    setExpandedLibraries(prev => 
+      prev.includes(libraryId) 
+        ? prev.filter(id => id !== libraryId) 
+        : [...prev, libraryId]
+    );
+  };
+
+  // Add state for library creation popup
+  const [showLibraryModal, setShowLibraryModal] = useState(false);
+  const [newLibraryName, setNewLibraryName] = useState('');
+  const [libraryDocuments, setLibraryDocuments] = useState([]);
+  
+  // Track library limits
+  const maxLibraries = 3;
+  const maxDocumentsPerLibrary = 5;
+
+  // Use Firebase for user libraries instead of dummy data
+  const [userLibraries, setUserLibraries] = useState([]);
+  const [loadingLibraries, setLoadingLibraries] = useState(false);
+
+  // Fetch user libraries from Firestore
+  const fetchUserLibraries = async (userIdParam) => {
+    const currentUserId = userIdParam || userId;
+    if (!currentUserId) return;
+    
+    setLoadingLibraries(true);
+    try {
+      const librariesRef = collection(db, 'user_libraries');
+      const q = query(
+        librariesRef,
+        where('userId', '==', currentUserId),
+        orderBy('createdAt', 'desc')
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const fetchedLibraries = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        documents: doc.data().documents || []
+      }));
+      
+      setUserLibraries(fetchedLibraries);
+      
+      // Expand first library by default if available
+      if (fetchedLibraries.length > 0 && !expandedLibraries.includes(fetchedLibraries[0].id)) {
+        setExpandedLibraries(prev => [...prev, fetchedLibraries[0].id]);
+      }
+    } catch (error) {
+      console.error("Error fetching libraries:", error);
+      toast.error("Failed to load document libraries");
+    } finally {
+      setLoadingLibraries(false);
+    }
+  };
+
+  // Function to handle document uploads
+  const handleFileUpload = (files) => {
+    // Convert FileList to Array and filter out non-document files
+    const fileArray = Array.from(files).filter(file => {
+      // Allow PDFs, Word docs, text files, etc.
+      const validTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'];
+      return validTypes.includes(file.type);
+    });
+    
+    // Check if adding new files would exceed the maximum
+    if (libraryDocuments.length + fileArray.length > maxDocumentsPerLibrary) {
+      toast.error(`You can only add up to ${maxDocumentsPerLibrary} documents per library.`);
+      return;
+    }
+    
+    // Add files to state
+    setLibraryDocuments(prev => [...prev, ...fileArray]);
+  };
+
+  // Function to add document to an existing library
+  const handleAddDocumentToLibrary = async (libraryId, files) => {
+    if (!userId || !libraryId) return;
+    
+    const library = userLibraries.find(lib => lib.id === libraryId);
+    if (!library) return;
+    
+    // Check if adding would exceed the maximum
+    if (library.documents.length >= maxDocumentsPerLibrary) {
+      toast.error(`This library already has the maximum of ${maxDocumentsPerLibrary} documents.`);
+      return;
+    }
+
+    // Convert FileList to Array 
+    const fileArray = Array.from(files);
+    
+    // Check if adding these files would exceed the maximum
+    if (library.documents.length + fileArray.length > maxDocumentsPerLibrary) {
+      toast.error(`Cannot add ${fileArray.length} documents. You can only add ${maxDocumentsPerLibrary - library.documents.length} more.`);
+      return;
+    }
+    
+    try {
+      // Create document metadata
+      const newDocuments = fileArray.map(file => ({
+        id: `doc-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        createdAt: new Date(),
+        // Here you would add vector embedding data once processed
+        vectorized: false
+      }));
+      
+      // Update the library document in Firestore
+      const libraryRef = doc(db, 'user_libraries', libraryId);
+      await updateDoc(libraryRef, {
+        documents: [...library.documents, ...newDocuments],
+        documentCount: library.documents.length + newDocuments.length,
+        updatedAt: serverTimestamp()
+      });
+      
+      // Update local state
+      setUserLibraries(prev => 
+        prev.map(lib => 
+          lib.id === libraryId 
+            ? { 
+                ...lib, 
+                documents: [...lib.documents, ...newDocuments],
+                documentCount: lib.documents.length + newDocuments.length,
+                updatedAt: new Date()
+              }
+            : lib
+        )
+      );
+      
+      toast.success(`Added ${newDocuments.length} document(s) to ${library.name}`);
+    } catch (error) {
+      console.error("Error adding documents to library:", error);
+      toast.error("Failed to add documents");
+    }
+  };
+  
+  // Function to handle library creation with Firestore integration
+  const handleCreateLibrary = async () => {
+    if (!userId || !newLibraryName.trim()) return;
+    
+    // Check if maximum libraries reached
+    if (userLibraries.length >= maxLibraries) {
+      toast.error(`You can only have a maximum of ${maxLibraries} libraries.`);
+      return;
+    }
+    
+    try {
+      // Prepare the documents array 
+      const documents = libraryDocuments.map(file => ({
+        id: `doc-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+        name: file.name,
+        size: file.size,
+        createdAt: new Date(),
+        type: file.type,
+        // Here you would add vector embedding data once processed
+        vectorized: false
+      }));
+      
+      // Create library document in Firestore
+      const libraryData = {
+        userId,
+        name: newLibraryName.trim(),
+        color: ['indigo', 'green', 'amber', 'blue', 'red'][Math.floor(Math.random() * 5)],
+        documents: documents,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        documentCount: documents.length
+      };
+      
+      const docRef = await addDoc(collection(db, 'user_libraries'), libraryData);
+      
+      // Add the new library to local state with proper ID from Firestore
+      const newLibrary = {
+        id: docRef.id,
+        ...libraryData,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+      
+      setUserLibraries(prev => [newLibrary, ...prev]);
+      
+      // Expand the new library
+      setExpandedLibraries(prev => [...prev, docRef.id]);
+      
+      // Handle file uploads to storage here (if needed)
+      // For now, we're just storing metadata
+      
+      // Reset state and close modal
+      toast.success('Library created successfully!');
+      setShowLibraryModal(false);
+      setNewLibraryName('');
+      setLibraryDocuments([]);
+    } catch (error) {
+      console.error("Error creating library:", error);
+      toast.error("Failed to create library");
+    }
+  };
+  
+  // Function to handle drag-and-drop
+  // Function to handle drag-and-drop
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFileUpload(e.dataTransfer.files);
+    }
+  };
+  
+  // Function to handle file input change
+  const handleFileInputChange = (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      handleFileUpload(e.target.files);
+    }
+  };
+  
+  //
+  // 5) Render the Playground UI
+  //
+  return (
+    <div className="flex w-full h-full">
+      {/* --------------------------------------------
+          LEFT - Chat list / Project folders panel
+      -------------------------------------------- */}
+      <div 
+        ref={leftPanelRef}
+        style={{ width: `${panelSizes.left}px` }}
+        className={`flex-shrink-0 border-r flex flex-col ${
+        darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'
+        }`}
+      >
+        {/* Chat list header */}
+        <div
+          className={`
+            sticky top-0 z-10 px-4 py-3 border-b flex items-center justify-between
+            ${
+              darkMode
+                ? 'border-gray-800 bg-gray-900/95 backdrop-blur-sm'
+                : 'border-gray-200 bg-white/95 backdrop-blur-sm'
+            }
+          `}
+        >
+          {showNewProjectInput ? (
+            <div className="flex-1 flex items-center">
+              <input
+                ref={newProjectInputRef}
+                type="text"
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
+                placeholder="Project name..."
+                className={`w-full text-xs px-2 py-1 rounded-md border ${
+                  darkMode
+                    ? 'bg-gray-800 border-gray-700 text-white'
+                    : 'bg-white border-gray-300 text-gray-800'
+                }`}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleCreateProject();
+                  } else if (e.key === 'Escape') {
+                    setShowNewProjectInput(false);
+                    setNewProjectName('');
+                  }
+                }}
+              />
+              {loadingProject ? (
+                <div className="ml-2 animate-spin h-3 w-3 border-2 border-blue-500 rounded-full border-t-transparent"></div>
+              ) : (
+          <button
+                  onClick={handleCreateProject}
+                  disabled={!newProjectName.trim()}
+                  className={`ml-2 ${
+                    darkMode ? 'text-blue-400 hover:text-blue-300' : 'text-blue-600 hover:text-blue-700'
+                  } ${!newProjectName.trim() ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <Save className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
+              <button
+                onClick={() => setShowNewProjectInput(true)}
+            className={`
+                  flex items-center space-x-2 rounded-md px-2 py-1 transition-colors duration-150
+              ${
+                darkMode
+                      ? 'text-blue-400 hover:bg-blue-900/20 hover:text-blue-300'
+                      : 'text-blue-600 hover:bg-blue-50 hover:text-blue-700'
+              }
+            `}
+          >
+                <Plus className="h-3.5 w-3.5" />
+                <span className="text-xs font-medium">New Project</span>
+          </button>
+          
+              <span className={`text-xs font-semibold tracking-wide uppercase ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+            Chats
+          </span>
+            </>
+          )}
+        </div>
+
+        {/* Project folders & chat list - Fix scrolling here */}
+        <div className={`flex-1 overflow-y-auto ${darkMode ? 'bg-gray-900' : 'bg-gray-50'}`}>
+          {loading ? (
+            <div className="flex justify-center items-center h-32">
+              <div className="animate-spin h-5 w-5 border-2 border-blue-500 rounded-full border-t-transparent"></div>
+            </div>
+          ) : projects.length === 0 ? (
+            <div className="p-4 text-center">
+              <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                No projects yet. Create your first project to get started.
+              </p>
+            </div>
+          ) : (
+            projects.map((project) => (
+              <div key={project.id} className="mt-1">
+              {/* Folder row */}
+              <div
+                className={`
+                    flex items-center px-3 py-1.5 cursor-pointer transition-colors duration-150 group
+                    ${darkMode ? 'hover:bg-gray-800/70' : 'hover:bg-gray-100/70'}
+                `}
+              >
+                  <div className="flex-1 flex items-center" onClick={() => toggleProject(project.id)}>
+                <ChevronDown
+                  className={`
+                        h-3.5 w-3.5 mr-1.5 transform transition-transform duration-200
+                    ${!project.expanded ? '-rotate-90' : ''}
+                        ${darkMode ? 'text-gray-500' : 'text-gray-500'}
+                  `}
+                />
+                    <Folder className={`h-4 w-4 mr-1.5 ${project.expanded ? (darkMode ? 'text-blue-400' : 'text-blue-500') : (darkMode ? 'text-gray-500' : 'text-gray-600')}`} />
+                    <span className={`text-xs font-medium ${project.expanded ? (darkMode ? 'text-blue-400' : 'text-blue-600') : (darkMode ? 'text-gray-300' : 'text-gray-700')}`}>
+                  {project.name}
+                </span>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      showDeleteConfirmation('project', project.id, project.name);
+                    }}
+                    className={`p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity ${
+                      darkMode ? 'hover:bg-gray-700 text-gray-400 hover:text-gray-300' : 'hover:bg-gray-200 text-gray-500 hover:text-gray-700'
+                    }`}
+                    title="Delete project"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+              </div>
+
+                {/* If expanded, show the chat list inside this folder with VS Code-like tree connections */}
+              {project.expanded && (
+                  <div className="relative">
+                    {/* Tree branch line */}
+                    <div className={`absolute left-[19px] top-0 bottom-0 w-px ${darkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+                    
+                    {chatHistory.length === 0 ? (
+                      <div className="pl-10 pr-2 py-2">
+                        <p className={`text-[10px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                          No chats yet
+                        </p>
+                      </div>
+                    ) : (
+                      chatHistory.map((chat, index) => (
+                        <div key={chat.id} className="relative">
+                          {/* Horizontal tree branch */}
+                          <div className={`absolute left-[19px] top-[14px] w-3 h-px ${darkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+                          
+                <div
+                  className={`
+                              flex items-center py-1.5 pl-8 pr-2 my-0.5 cursor-pointer rounded
+                              relative transition-all duration-200 group
+                        ${
+                          chat.selected
+                            ? darkMode
+                              ? 'bg-blue-900/30 border-l-2 border-blue-500'
+                              : 'bg-blue-50 border-l-2 border-blue-500'
+                            : darkMode
+                                  ? 'hover:bg-gray-800/70 hover:border-l-2 hover:border-blue-500/50 border-l-2 border-transparent'
+                                  : 'hover:bg-gray-100/70 hover:border-l-2 hover:border-blue-500/50 border-l-2 border-transparent'
+                        }
+                      `}
+                    >
+                            <div className="flex-1" onClick={() => handleChatSelect(chat.id)}>
+                        <span
+                          className={`
+                                  text-xs truncate
+                            ${
+                              chat.selected
+                                ? darkMode
+                                  ? 'text-blue-400 font-medium'
+                                  : 'text-blue-600 font-medium'
+                                : darkMode
+                                        ? 'text-gray-400'
+                                        : 'text-gray-600'
+                            }
+                          `}
+                        >
+                          {chat.name}
+                        </span>
+                      </div>
+
+                            <div className="flex items-center">
+                              {/* Delete chat button */}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  showDeleteConfirmation('chat', chat.id, chat.name);
+                                }}
+                                className={`p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity ${
+                                  darkMode ? 'hover:bg-gray-700 text-gray-400 hover:text-gray-300' : 'hover:bg-gray-200 text-gray-500 hover:text-gray-700'
+                                }`}
+                                title="Delete chat"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                              
+                              {/* Existing dropdown icon */}
+                      {chat.selected && (
+                                <ChevronDown className={`h-3.5 w-3.5 ml-1 ${darkMode ? 'text-blue-400' : 'text-blue-500'}`} />
+                      )}
+                    </div>
+                </div>
+                          
+                          {/* Last branch cap to close the tree for the last element */}
+                          {index === chatHistory.length - 1 && (
+                            <div 
+                              className={`absolute left-[19px] top-[15px] bottom-0 w-px ${darkMode ? 'bg-gray-900' : 'bg-gray-50'}`}
+                            ></div>
+              )}
+            </div>
+                      ))
+                    )}
+                    
+                    {/* Add New Chat button with tree connection */}
+                    <div className="relative">
+                      <div className={`absolute left-[19px] top-0 w-3 h-px ${darkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+                      <button 
+                        onClick={() => handleCreateChat(project.id)}
+                        disabled={loadingChat}
+                        className={`
+                          flex items-center py-1.5 pl-8 pr-2 my-1 rounded
+                          ${darkMode ? 'hover:bg-gray-800/50 text-gray-500' : 'hover:bg-gray-100/50 text-gray-500'}
+                          transition-all duration-150
+                          ${loadingChat ? 'opacity-50 cursor-wait' : ''}
+                        `}
+                      >
+                        {loadingChat ? (
+                          <div className="animate-spin h-3 w-3 border-2 border-gray-500 rounded-full border-t-transparent mr-1.5"></div>
+                        ) : (
+                          <PlusIcon className="h-3.5 w-3.5 mr-1.5" />
+                        )}
+                        <span className="text-xs">New Chat</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Resize handle for left panel */}
+      <div
+        ref={leftResizeRef}
+        className={`w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 z-10 ${
+          darkMode ? 'bg-gray-800 hover:bg-blue-600 active:bg-blue-700' : 'bg-gray-200'
+        }`}
+        onMouseDown={(e) => {
+          leftResizeRef.current.dataset.resizing = 'true';
+          document.body.style.cursor = 'col-resize';
+          document.body.style.userSelect = 'none'; // Prevent text selection during resize
+          e.preventDefault();
+        }}
+      ></div>
+
+      {/* --------------------------------------------
+          MIDDLE - Chat interface
+      -------------------------------------------- */}
+      <div ref={middlePanelRef} className="flex-1 flex flex-col overflow-hidden">
+        {/* Top navbar with model selector */}
+        <div
+          className={`
+            flex items-center py-1.5 px-3 border-b
+            ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}
+          `}
+        >
+          <div className="mx-auto relative w-full max-w-md">
+            <button
+              onClick={toggleModelDropdown}
+              className={`
+                w-full flex items-center justify-center rounded-md py-1 px-4
+                ${darkMode
+                  ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                  : 'bg-indigo-500 hover:bg-indigo-600 text-white'
+                }
+              `}
+            >
+              <span className="text-xs font-medium mr-1">
+                {playgroundModel?.name || 'meta-llama-3.1-8b-instruct'}
+              </span>
+              <ChevronDown className="h-3 w-3" />
+            </button>
+
+            {/* Model Selection Dropdown */}
+            {modelDropdownVisible && (
+              <div 
+                ref={modelDropdownRef}
+                className={`
+                  absolute top-full left-0 right-0 mt-1 z-50 border rounded-md shadow-lg
+                  ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'}
+                `}
+                style={{ width: '100%' }}
+              >
+                <div className="text-center font-medium py-2 border-b border-gray-700">Select Model</div>
+                
+                {/* Filter and dropdown row */}
+                <div className="flex mx-2 mb-2">
+                  <div className="flex-1 relative">
+                    <button
+                      id="model-type-button"
+                      onClick={toggleModelTypeDropdown}
+                      className={`
+                        w-full flex items-center justify-center rounded-l border p-1 text-center text-xs
+                        ${darkMode ? 'border-gray-700 bg-gray-900 text-white' : 'border-gray-300 bg-gray-50 text-gray-800'}
+                      `}
+                    >
+                      <span className="flex-1 text-center">
+                        {modelTypes.find(t => t.id === modelTypeFilter)?.name || 'All Models'}
+                      </span>
+                      <ChevronDown className="h-3 w-3 ml-1" />
+                    </button>
+                    
+                    {/* Model Type Dropdown */}
+                    {showModelTypeDropdown && (
+                      <div 
+                        ref={modelTypeDropdownRef}
+                        className={`
+                          absolute top-full left-0 right-0 mt-1 z-50 border rounded-md shadow-lg overflow-hidden
+                          ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'}
+                        `}
+                      >
+                        {modelTypes.map(type => (
+                          <div 
+                            key={type.id}
+                            onClick={() => selectModelType(type.id)}
+                            className={`
+                              p-2 text-xs cursor-pointer
+                              ${darkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}
+                              ${modelTypeFilter === type.id ? (darkMode ? 'bg-gray-700' : 'bg-gray-200') : ''}
+                            `}
+                          >
+                            {type.name}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  
+                  <div className={`
+                    flex-1 border-r border-t border-b rounded-r p-1 text-center text-xs
+                    ${darkMode ? 'border-gray-700 bg-gray-900 text-gray-300' : 'border-gray-300 bg-gray-50 text-gray-700'}
+                  `}>
+                    Filter Model Type
+                  </div>
+                </div>
+                
+                {/* Search input */}
+                <div className="flex mx-2 mb-2">
+                  <div className={`
+                    flex-1 border rounded-l p-1
+                    ${darkMode ? 'border-gray-700 bg-gray-900' : 'border-gray-300 bg-gray-50'}
+                  `}>
+                    <input 
+                      type="text" 
+                      className={`
+                        w-full bg-transparent outline-none text-xs
+                        ${darkMode ? 'text-white placeholder-gray-500' : 'text-gray-800 placeholder-gray-400'}
+                      `}
+                      placeholder="Search Model Name"
+                      value={modelSearchQuery}
+                      onChange={(e) => setModelSearchQuery(e.target.value)}
+                    />
+                  </div>
+                  <div className={`
+                    border-r border-t border-b rounded-r p-1 px-3 text-center text-xs
+                    ${darkMode ? 'border-gray-700 bg-gray-900 text-gray-300' : 'border-gray-300 bg-gray-50 text-gray-700'}
+                  `}>
+                    Search
+                  </div>
+                </div>
+                
+                {/* Model list - Scrollable */}
+                <div className="overflow-y-auto mx-2 mb-2" style={{ maxHeight: '280px' }}>
+                  {filteredModels.length > 0 ? (
+                    filteredModels.map((model) => {
+                      const deployed = isModelDeployed(model.id);
+                      return (
+                        <div 
+                          key={model.id}
+                          className={`
+                            flex items-center justify-between p-2 border-b
+                            ${darkMode ? 'border-gray-700 hover:bg-gray-700' : 'border-gray-200 hover:bg-gray-50'}
+                          `}
+                        >
+                          <div className="flex flex-col">
+                            <div className={`text-sm ${darkMode ? 'text-blue-400' : 'text-blue-600'}`}>
+                              {model.name}
+                            </div>
+                            {model.parameters && (
+                              <div className="text-xs text-gray-500">{model.parameters} params</div>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => deployed ? selectModel(model) : handleDeployModel(model)}
+                            className={`
+                              px-3 py-1 text-xs font-medium rounded
+                              ${deployed 
+                                ? darkMode 
+                                  ? 'bg-gray-700 hover:bg-gray-600 text-gray-300' 
+                                  : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
+                                : darkMode
+                                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                                  : 'bg-blue-500 hover:bg-blue-600 text-white'
+                              }
+                            `}
+                          >
+                            {deployed ? 'Select' : 'Deploy'}
+                          </button>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="p-4 text-center text-sm text-gray-500">
+                      No models found matching your filters
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Second header row with chat title and options */}
+        <div
+          className={`
+            flex items-center justify-between px-3 py-1.5 border-b
+            ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}
+          `}
+        >
+          <div className="text-xs font-medium">
+            {chatHistory.find(c => c.selected)?.name || 'No chat selected'}
+          </div>
+
+          <div className="flex items-center space-x-4">
+            <button
+              onClick={handleNewChat}
+              className={`py-0.5 text-xs ${darkMode ? 'text-gray-400 hover:text-gray-300' : 'text-gray-600 hover:text-gray-800'}`}
+>
+  <span className="flex items-center">
+    <PlusIcon className="h-3.5 w-3.5 mr-1" />
+    New Chat
+  </span>
+</button>
+
+            <button
+              onClick={handleClearChat}
+              disabled={!chatHistory.find(c => c.selected) || chatMessages.length === 0}
+              className={`py-0.5 text-xs ${
+                !chatHistory.find(c => c.selected) || chatMessages.length === 0
+                  ? 'opacity-50 cursor-not-allowed'
+                  : ''
+              } ${darkMode ? 'text-gray-400 hover:text-gray-300' : 'text-gray-600 hover:text-gray-800'}`}
+            >
+              <span className="flex items-center">
+                <svg className="h-3.5 w-3.5 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                Clear Chat
+              </span>
+            </button>
+
+            <button
+              onClick={handleSaveChat}
+              disabled={!chatHistory.find(c => c.selected) || chatMessages.length === 0}
+              className={`py-0.5 text-xs ${
+                !chatHistory.find(c => c.selected) || chatMessages.length === 0
+                  ? 'opacity-50 cursor-not-allowed'
+                  : ''
+              } ${darkMode ? 'text-gray-400 hover:text-gray-300' : 'text-gray-600 hover:text-gray-800'}`}
+            >
+              <span className="flex items-center">
+                <Save className="h-3.5 w-3.5 mr-1" />
+                Save Chat
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Chat content */}
+        <div className={`flex-1 overflow-y-auto ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
+          <div className="max-w-3xl mx-auto px-4 py-4">
+            {isProcessing && chatMessages.length === 0 ? (
+              <div className="flex justify-center items-center h-32">
+                <div className="animate-spin h-5 w-5 border-2 border-blue-500 rounded-full border-t-transparent"></div>
+              </div>
+            ) : chatMessages.length > 0 ? (
+              chatMessages.map((msg, idx) => {
+              const isAssistant = msg.role === 'assistant';
+              return (
+                <div key={idx} className="mb-6">
+                  <div className="flex items-center mb-2">
+                    <span
+                      className={`
+                        text-sm font-medium
+                        ${darkMode ? 'text-gray-300' : 'text-gray-700'}
+                      `}
+                    >
+                      {isAssistant ? 'Assistant' : 'User'}
+                    </span>
+                    {isAssistant && (
+                      <span
+                        className={`
+                          text-[10px] ml-2 px-1.5 py-0.5 rounded
+                          ${darkMode ? 'bg-gray-800 text-gray-400' : 'bg-gray-200 text-gray-600'} 
+                          font-mono
+                        `}
+                      >
+                        {msg.model || 'meta-llama-3.1-8b-instruct'}
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    className={`
+                      mt-2
+                      ${darkMode ? 'text-gray-200' : 'text-gray-800'}
+                    `}
+                  >
+                    <div className="text-sm whitespace-pre-wrap">
+                      {isAssistant && msg.content.includes('Implementation') ? (
+                        <>
+                          <h3 className="text-lg font-medium mb-4">Implementation</h3>
+                          <div className="relative group">
+                            <pre className={`p-4 rounded-md overflow-x-auto ${darkMode ? 'bg-gray-800' : 'bg-gray-100'}`}>
+                              <code className="text-sm font-mono">
+                                {`#include <iostream>
+#include <fstream>
+#include <string>
+#include <map>
+
+// Forward declarations
+class FileSystem;
+class Directory;
+class File;
+
+// Abstract base class for File System components (Directory/File)
+class FileSystemComponent {
+public:
+    virtual ~FileSystemComponent() {}`}
+                              </code>
+                            </pre>
+                            <button className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <Copy className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        msg.content
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+              })
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center py-12">
+                <div className={`text-center p-6 rounded-lg ${darkMode ? 'bg-gray-800' : 'bg-gray-50'} max-w-md`}>
+                  <div className="mb-3">
+                    <svg className={`h-12 w-12 mx-auto ${darkMode ? 'text-gray-600' : 'text-gray-400'}`} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    </svg>
+                  </div>
+                  <h3 className={`text-lg font-medium mb-1 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                    No messages yet
+                  </h3>
+                  <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {chatHistory.find(c => c.selected) 
+                      ? 'Start a conversation by typing a message below'
+                      : 'Select a chat from the sidebar or create a new one'}
+                  </p>
+                  {!chatHistory.find(c => c.selected) && (
+                    <button
+                      onClick={handleNewChat}
+                      className={`mt-4 px-4 py-2 rounded text-sm font-medium
+                        ${darkMode ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                    >
+                      <span className="flex items-center justify-center">
+                        <PlusIcon className="h-4 w-4 mr-1.5" />
+                        New Chat
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* The 'scroll to bottom' reference */}
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        {/* Input area */}
+        <div
+          className={`
+            px-4 py-3 border-t
+            ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}
+          `}
+        >
+          <div className="max-w-3xl mx-auto">
+            <div className="relative">
+              <textarea
+                value={userInput}
+                onChange={(e) => setUserInput(e.target.value)}
+                placeholder="Type a message and press Enter to send..."
+                rows="1"
+                className={`
+                  w-full p-2.5 pl-3 rounded-md border resize-none
+                  ${
+                    darkMode
+                      ? 'bg-gray-800 border-gray-700 focus:border-blue-500 text-gray-200 placeholder-gray-500'
+                      : 'bg-white border-gray-300 focus:border-blue-400 text-gray-800 placeholder-gray-400'
+                  }
+                  focus:outline-none focus:ring-1 focus:ring-blue-500 text-sm
+                `}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage();
+                  }
+                }}
+              />
+            </div>
+
+            <div className="flex justify-between items-center mt-1.5">
+              <div className="flex items-center">
+                <span className="text-xs text-gray-500">User (Ctrl + U)</span>
+                <button className="ml-2 opacity-70">
+                  <Link className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              <div className="flex items-center">
+                <span className="text-xs text-gray-500 mr-2">
+                  {isProcessing ? 'Processing...' : 'Insert (Ctrl + I)'}
+                </span>
+                <button
+                  onClick={handleSendMessage}
+                  disabled={userInput.trim() === '' || isProcessing}
+                  className={`
+                    px-2 py-1 rounded text-xs font-medium
+                    ${(userInput.trim() === '' || isProcessing) ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90'}
+                    ${darkMode ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white'}
+                  `}
+                >
+                  {isProcessing ? (
+                    <span className="flex items-center">
+                      <svg className="animate-spin -ml-1 mr-2 h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Processing
+                    </span>
+                  ) : (
+                    'Send'
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-1.5 text-center">
+              <span className="text-[10px] text-gray-500 font-mono">
+                Token Usage: 100/1500
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Resize handle for right panel */}
+      {rightPanelExpanded && (
+        <div
+          ref={rightResizeRef}
+          className={`w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 z-10 ${
+            darkMode ? 'bg-gray-800 hover:bg-blue-600 active:bg-blue-700' : 'bg-gray-200'
+          }`}
+          onMouseDown={(e) => {
+            rightResizeRef.current.dataset.resizing = 'true';
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none'; // Prevent text selection during resize
+            e.preventDefault();
+          }}
+        ></div>
+      )}
+
+      {/* --------------------------------------------
+          RIGHT - Configuration panel (UPDATED)
+      -------------------------------------------- */}
+      <div 
+        ref={rightPanelRef}
+        style={{ width: `${panelSizes.right}px` }}
+        className={`transition-all duration-300 border-l flex flex-col overflow-hidden ${
+        darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'
+      }`}>
+        <div className="p-3 border-b flex items-center justify-between">
+          {rightPanelExpanded ? (
+            <>
+          <span className="text-sm font-medium">
+            <span className={`inline-flex items-center ${darkMode ? 'text-indigo-400' : 'text-indigo-600'}`}>
+              <Folder className="w-4 h-4 mr-1.5" />
+              Document Library
+            </span>
+          </span>
+              <button 
+                onClick={() => setRightPanelExpanded(false)}
+                className={`p-1 rounded-md ${darkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
+              >
+                <svg className="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                </svg>
+              </button>
+            </>
+          ) : (
+            <button 
+              onClick={() => setRightPanelExpanded(true)}
+              className={`mx-auto p-1 rounded-md ${darkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
+              title="Expand Library Panel"
+            >
+              <svg className="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+              </svg>
+            </button>
+          )}
+        </div>
+
+        {rightPanelExpanded && (
+          <>
+        <div className="flex-1 overflow-y-auto">
+          <div className="p-3">
+            {/* Library Search */}
+            <div className="mb-4">
+              <div className={`flex items-center w-full rounded-md border mb-2 ${
+                darkMode ? 'border-gray-700 bg-gray-800' : 'border-gray-300 bg-white'
+              }`}>
+                <input
+                  type="text"
+                  placeholder="Search documents..."
+                  className={`w-full py-1.5 px-3 text-xs rounded-md border-0 outline-none ${
+                    darkMode ? 'bg-gray-800 text-gray-200 placeholder-gray-500' : 'bg-white text-gray-800 placeholder-gray-400'
+                  }`}
+                />
+                <button className={`px-3 py-1.5 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                  <svg className="h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+import { getAuth, onAuthStateChanged } from 'firebase/auth';
+import { addDoc, collection, doc, getDocs, orderBy, query, serverTimestamp, updateDoc, where, writeBatch } from 'firebase/firestore';
+import {
+    AlertTriangle,
+    ChevronDown,
+    Copy,
+    Folder,
+    Link,
+    Plus,
+    PlusIcon,
+    Save,
+    Trash2,
+    X
+} from 'lucide-react';
+import PropTypes from 'prop-types';
+import { useEffect, useRef, useState } from 'react';
+import { toast } from 'react-toastify';
+import modelsData from '../data/models.json';
+import db from '../screens/firebase/config';
+import ModelDeployPanel from './ModelDeployPanel';
+
+/**
+ * ModelReadbuddy
+ * 
+ * This version defines its own local states for chat messages,
+ * projects, user input, etc., so you don't need to pass them
+ * from the parent.
+ */
+const ModelReadbuddy = ({
+  darkMode,
+}) => {
+  //
+  // 1) Local states for chat + playground
+  //
+  const [projects, setProjects] = useState([]);
+  const [chatHistory, setChatHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingProject, setLoadingProject] = useState(false);
+  const [loadingChat, setLoadingChat] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [showNewProjectInput, setShowNewProjectInput] = useState(false);
+
+  // Add state for selected document
+  const [selectedDocument, setSelectedDocument] = useState(null);
+
+  // Firebase auth
+  const auth = getAuth();
+  const [userId, setUserId] = useState(null);
+  // eslint-disable-next-line no-unused-vars
+  const [userInfo, setUserInfo] = useState(null);
+  // eslint-disable-next-line no-unused-vars
+  const [loggedIn, setLoggedIn] = useState(false);
+
+  // Example chat messages: each message has {role, content}
+  const [chatMessages, setChatMessages] = useState([]);
+  // Message cache to store messages for each chat
+  const [messageCache, setMessageCache] = useState({});
+  // Current chat ID to track which chat we're viewing - state only needed for the setter
+  // eslint-disable-next-line no-unused-vars
+  const [currentChatId, setCurrentChatId] = useState(null);
+
+  const [userInput, setUserInput] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  // Example model settings
+  const [playgroundModel, setPlaygroundModel] = useState({
+    name: 'meta-llama-3.1-8b-instruct'
+  });
+  // Add state for right panel collapse
+  const [rightPanelExpanded, setRightPanelExpanded] = useState(true);
+  
+  // Add state for model selection dropdown
+  const [modelDropdownVisible, setModelDropdownVisible] = useState(false);
+  const [modelSearchQuery, setModelSearchQuery] = useState('');
+  const [modelTypeFilter, setModelTypeFilter] = useState('all');
+  const [showModelTypeDropdown, setShowModelTypeDropdown] = useState(false);
+  
+  // Add state to track expanded libraries
+  const [expandedLibraries, setExpandedLibraries] = useState(['library-1']);
+  
+  // Model deployment state
+  const [showDeployPanel, setShowDeployPanel] = useState(false);
+  const [selectedModelToDeploy, setSelectedModelToDeploy] = useState(null);
+  const [deployedModels, setDeployedModels] = useState([
+    { id: '1', name: 'meta-llama-3.1-8b-instruct', type: 'llama', status: 'deployed' },
+    { id: '4', name: 'claude-3-opus', type: 'claude', status: 'deployed' },
+    { id: '6', name: 'llama-2-13b', type: 'llama', status: 'deployed' },
+    { id: '8', name: 'mixtral-8x7b', type: 'mixtral', status: 'deployed' }
+  ]);
+  
+  // Load models from models.json
+  const [availableModels, setAvailableModels] = useState([]);
+  
+  useEffect(() => {
+    // Use the imported models data from JSON file
+    const models = modelsData.models.map(model => ({
+      id: model.id,
+      name: model.name,
+      type: model.brand.toLowerCase(),
+      status: 'available',
+      parameters: model.parameters,
+      requirements: model.requirements,
+      size: model.size
+    }));
+    setAvailableModels(models);
+  }, []);
+  
+  // Model type options
+  const modelTypes = [
+    { id: 'all', name: 'All Models' },
+    { id: 'llama', name: 'Llama' },
+    { id: 'deepseek', name: 'DeepSeek' },
+    { id: 'gemma', name: 'Gemma' },
+    { id: 'qwen', name: 'Qwen' }
+  ];
+  
+  // Ref for model dropdown and model type dropdown
+  const modelDropdownRef = useRef(null);
+  const modelTypeDropdownRef = useRef(null);
+  
+  // Function to toggle model dropdown
+  const toggleModelDropdown = () => {
+    setModelDropdownVisible(!modelDropdownVisible);
+    setShowModelTypeDropdown(false);
+  };
+  
+  // Function to toggle model type dropdown
+  const toggleModelTypeDropdown = (e) => {
+    e.stopPropagation();
+    setShowModelTypeDropdown(!showModelTypeDropdown);
+  };
+  
+  // Function to select a model type
+  const selectModelType = (type) => {
+    setModelTypeFilter(type);
+    setShowModelTypeDropdown(false);
+  };
+  
+  // Function to select a model
+  const selectModel = (model) => {
+    setPlaygroundModel(model);
+    setModelDropdownVisible(false);
+  };
+  
+  // Function to handle model deployment
+  const handleDeployModel = (model) => {
+    setSelectedModelToDeploy(model);
+    setShowDeployPanel(true);
+    setModelDropdownVisible(false);
+  };
+  
+  // Function to handle deployment completion
+  const handleModelDeployed = (result) => {
+    if (result && result.success) {
+      // Add the newly deployed model to deployedModels
+      setDeployedModels(prev => [...prev, {
+        ...selectedModelToDeploy,
+        status: 'deployed'
+      }]);
+      
+      // Select the newly deployed model
+      setPlaygroundModel(selectedModelToDeploy);
+      
+      toast.success(`Model ${selectedModelToDeploy.name} deployed successfully!`);
+    }
+    return { success: true };
+  };
+
+  // Close dropdowns when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(event.target)) {
+        setModelDropdownVisible(false);
+      }
+      if (
+        modelTypeDropdownRef.current && 
+        !modelTypeDropdownRef.current.contains(event.target) &&
+        event.target.id !== 'model-type-button'
+      ) {
+        setShowModelTypeDropdown(false);
+      }
+    };
+    
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  // Check if a model is deployed
+  const isModelDeployed = (modelId) => {
+    return deployedModels.some(m => m.id === modelId);
+  };
+
+  // Filtered models based on search, model type, and deployment status
+  const filteredModels = availableModels.filter(model => {
+    // Type filter check
+    const typeMatch = modelTypeFilter === 'all' || model.type === modelTypeFilter;
+    
+    // Search filter check
+    const searchMatch = modelSearchQuery.trim() === '' || 
+      model.name.toLowerCase().includes(modelSearchQuery.toLowerCase());
+    
+    return typeMatch && searchMatch;
+  });
+
+  // Ref to scroll chat into view
+  const messagesEndRef = useRef(null);
+  const newProjectInputRef = useRef(null);
+
+  // Add state for confirmation dialog
+  const [deleteConfirmation, setDeleteConfirmation] = useState({
+    isOpen: false,
+    type: null, // 'project' or 'chat'
+    itemId: null,
+    itemName: '',
+    isDeleting: false
+  });
+
+  // Add state for panel sizes
+  const [panelSizes, setPanelSizes] = useState({
+    left: 192, // w-48 is 12rem or 192px
+    right: rightPanelExpanded ? 288 : 40 // w-72 is 18rem or 288px, collapsed is 40px
+  });
+
+  // Add refs for resize handling
+  const leftPanelRef = useRef(null);
+  const middlePanelRef = useRef(null);
+  const rightPanelRef = useRef(null);
+  const leftResizeRef = useRef(null);
+  const rightResizeRef = useRef(null);
+
+  //
+  // 2) Firebase integration
+  //
+  
+  // Check auth state changes to load projects when user signs in
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setUserId(user.uid);
+        setUserInfo({
+          displayName: user.displayName || "User",
+          email: user.email,
+          photoURL: user.photoURL || "/img/avatar.png",
+        });
+        setLoggedIn(true);
+        
+        // Load user libraries when authenticated
+        fetchUserLibraries(user.uid);
+      } else {
+        setLoggedIn(false);
+        setUserId(null);
+        setUserInfo(null);
+        
+        // Reset libraries when signed out
+        setUserLibraries([]);
+        setExpandedLibraries([]);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+  
+  // Fetch projects and chat history on component mount
+  // eslint-disable-next-line no-unused-vars
+  const fetchProjects = async (userIdParam) => {
+    const currentUserId = userIdParam || userId;
+    if (!currentUserId) return;
+    
+    setLoading(true);
+    try {
+      const projectsRef = collection(db, 'playground_projects');
+      const q = query(
+        projectsRef,
+        where('userId', '==', currentUserId),
+        orderBy('createdAt', 'desc')
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const fetchedProjects = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        expanded: false
+      }));
+      
+      // Default expand the first project if there is one
+      if (fetchedProjects.length > 0) {
+        fetchedProjects[0].expanded = true;
+        setProjects(fetchedProjects);
+        
+        // Fetch chats for this project
+        await fetchChats(fetchedProjects[0].id, currentUserId);
+      } else {
+        setProjects([]);
+        setChatHistory([]);
+      }
+      
+      // If no projects, show create project input
+      if (fetchedProjects.length === 0) {
+        setShowNewProjectInput(true);
+      }
+    } catch (error) {
+      console.error("Error fetching projects:", error);
+      toast.error("Failed to load projects");
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Fetch chats for a specific project
+  const fetchChats = async (projectId, userIdParam) => {
+    const currentUserId = userIdParam || userId;
+    if (!currentUserId || !projectId) return;
+    
+    try {
+      // Clear chat history before fetching new chats to avoid duplicates
+      setChatHistory([]);
+      setChatMessages([]);
+      
+      const chatsRef = collection(db, 'playground_chats');
+      const q = query(
+        chatsRef,
+        where('userId', '==', currentUserId),
+        where('projectId', '==', projectId),
+        orderBy('createdAt', 'desc')
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const fetchedChats = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        projectId: projectId, // Explicitly store projectId in the chat object
+        selected: false
+      }));
+      
+      // Select the first chat if available
+      if (fetchedChats.length > 0) {
+        fetchedChats[0].selected = true;
+        setChatHistory(fetchedChats);
+        
+        // Set current chat ID
+        setCurrentChatId(fetchedChats[0].id);
+        
+        // Fetch messages for this chat
+        await fetchMessages(fetchedChats[0].id, currentUserId);
+      } else {
+        setChatHistory([]);
+        setChatMessages([]);
+        
+        // Create a default chat if there are no chats
+        if (projects.find(p => p.id === projectId)) {
+          await handleCreateChat(projectId, "New Chat");
+        }
+      }
+    } catch (error) {
+      console.error("Error fetching chats:", error);
+      toast.error("Failed to load chats");
+    }
+  };
+  
+  // Fetch messages for a specific chat
+  const fetchMessages = async (chatId, userIdParam) => {
+    const currentUserId = userIdParam || userId;
+    if (!currentUserId || !chatId) return;
+    
+    try {
+      // Check if we already have messages in the cache
+      if (messageCache[chatId] && messageCache[chatId].length > 0) {
+        // Use cached messages first for instant display
+        setChatMessages(messageCache[chatId]);
+        
+        // Still show loading but with existing messages
+        setIsProcessing(true);
+      } else {
+        // No cached messages, show loading state and clear messages
+        setIsProcessing(true);
+        setChatMessages([]);
+      }
+      
+      // Fetch from Firebase
+      const messagesRef = collection(db, 'playground_messages');
+      const q = query(
+        messagesRef,
+        where('chatId', '==', chatId),
+        orderBy('createdAt', 'asc')
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const fetchedMessages = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      
+      // Update cache with new messages
+      setMessageCache(prev => ({
+        ...prev,
+        [chatId]: fetchedMessages
+      }));
+      
+      // Update chat messages
+      setChatMessages(fetchedMessages);
+      setIsProcessing(false);
+    } catch (error) {
+      console.error("Error fetching messages:", error);
+      toast.error("Failed to load chat messages");
+      setIsProcessing(false);
+    }
+  };
+  
+  // Create a new project
+  const handleCreateProject = async () => {
+    if (!userId || !newProjectName.trim()) return;
+    
+    setLoadingProject(true);
+    try {
+      const projectData = {
+        userId,
+        name: newProjectName.trim(),
+        createdAt: serverTimestamp()
+      };
+      
+      const docRef = await addDoc(collection(db, 'playground_projects'), projectData);
+      
+      // Add to local state
+      const newProject = {
+        id: docRef.id,
+        ...projectData,
+        createdAt: new Date(),
+        expanded: true
+      };
+      
+      // Collapse all other projects
+      const updatedProjects = projects.map(p => ({ ...p, expanded: false }));
+      setProjects([newProject, ...updatedProjects]);
+      
+      // Reset input
+      setNewProjectName('');
+      setShowNewProjectInput(false);
+      
+      // Create a default chat for this project
+      await handleCreateChat(docRef.id, "New Chat");
+    } catch (error) {
+      console.error("Error creating project:", error);
+      toast.error("Failed to create project");
+    } finally {
+      setLoadingProject(false);
+    }
+  };
+  
+  // Create a new chat
+  const handleCreateChat = async (projectId, name = "New Chat") => {
+    if (!userId || !projectId) return;
+    
+    setLoadingChat(true);
+    try {
+      const chatData = {
+        userId,
+        projectId,
+        name,
+        createdAt: serverTimestamp()
+      };
+      
+      const docRef = await addDoc(collection(db, 'playground_chats'), chatData);
+      
+      // Add to local state
+      const newChat = {
+        id: docRef.id,
+        ...chatData,
+        createdAt: new Date(),
+        selected: true
+      };
+      
+      // Deselect all other chats
+      const updatedChats = chatHistory.map(c => ({ ...c, selected: false }));
+      setChatHistory([newChat, ...updatedChats]);
+      
+      // Clear messages
+      setChatMessages([]);
+      
+      return docRef.id;
+    } catch (error) {
+      console.error("Error creating chat:", error);
+      toast.error("Failed to create chat");
+    } finally {
+      setLoadingChat(false);
+    }
+  };
+
+  // Generate a chat name from the first message
+  const generateChatName = (message) => {
+    // Get first 30 characters of the message
+    const truncated = message.slice(0, 30);
+    
+    // If the message is shorter than 30 chars, use it as is
+    // Otherwise add ellipsis
+    const baseName = truncated.length < 30 ? truncated : `${truncated}...`;
+    
+    // Remove special characters, make it title case
+    return baseName
+      .replace(/[^\w\s]/gi, '')
+      .trim()
+      .split(' ')
+      .filter(word => word.length > 0)
+      .slice(0, 4)
+      .join(' ');
+  };
+
+  // Update chat name in Firebase and local state
+  const updateChatName = async (chatId, newName) => {
+    if (!userId || !chatId) return;
+    
+    try {
+      // Update in Firebase
+      const chatRef = doc(db, 'playground_chats', chatId);
+      await updateDoc(chatRef, { name: newName });
+      
+      // Update in local state
+      setChatHistory(prev => 
+        prev.map(chat => 
+          chat.id === chatId ? { ...chat, name: newName } : chat
+        )
+      );
+    } catch (error) {
+      console.error("Error updating chat name:", error);
+      toast.error("Failed to update chat name");
+    }
+  };
+
+  //
+  // 3) Handlers
+  //
+  const handleSendMessage = async () => {
+    if (!userInput.trim()) return;
+    
+    // Get selected chat ID or active project to create new chat
+    const selectedChat = chatHistory.find(c => c.selected);
+    const activeProject = projects.find(p => p.expanded);
+    
+    // If no active project, show error
+    if (!activeProject) {
+      toast.error("Please create or select a project first");
+      return;
+    }
+
+    let currentChatId = selectedChat?.id;
+    let isFirstMessage = false;
+    
+    // If no chat is selected, create a new chat
+    if (!currentChatId) {
+      currentChatId = await handleCreateChat(activeProject.id);
+      isFirstMessage = true;
+      
+      // Set current chat ID for the new chat
+      setCurrentChatId(currentChatId);
+    }
+    
+    setIsProcessing(true);
+
+    try {
+      // Create user message in Firebase
+      const userMessageData = {
+        chatId: currentChatId,
+        role: 'user',
+        content: userInput,
+        createdAt: serverTimestamp()
+      };
+      
+      const userMsgRef = await addDoc(collection(db, 'playground_messages'), userMessageData);
+      
+      // Add to local state
+      const userMsg = {
+        id: userMsgRef.id,
+        ...userMessageData,
+        createdAt: new Date()
+      };
+      
+      // Update chat messages and cache
+      const updatedMessages = [...chatMessages, userMsg];
+      setChatMessages(updatedMessages);
+      setMessageCache(prev => ({
+      ...prev,
+        [currentChatId]: updatedMessages
+      }));
+      
+    setUserInput('');
+
+      // If this is the first message in the chat, auto-generate a name
+      if (isFirstMessage || chatMessages.length === 0) {
+        const generatedName = generateChatName(userInput);
+        await updateChatName(currentChatId, generatedName);
+      }
+
+    // Simulate AI response (fake 1-second delay)
+      // In a real app, you'd call your backend/API here
+      setTimeout(async () => {
+        // Create assistant message in Firebase
+        const assistantMessageData = {
+          chatId: currentChatId,
+          role: 'assistant',
+          model: 'meta-llama-3.1-8b-instruct',
+          content: `Implementation\n\n\`\`\`\n#include <iostream>\n#include <fstream>\n#include <string>\n#include <map>\n\n// Forward declarations\nclass FileSystem;\nclass Directory;\nclass File;\n\n// Abstract base class for File System components (Directory/File)\nclass FileSystemComponent {\npublic:\n    virtual ~FileSystemComponent() {}\n\`\`\``,
+          createdAt: serverTimestamp()
+        };
+        
+        const assistantMsgRef = await addDoc(collection(db, 'playground_messages'), assistantMessageData);
+        
+        // Add to local state
+        const assistantMsg = {
+          id: assistantMsgRef.id,
+          ...assistantMessageData,
+          createdAt: new Date()
+        };
+        
+        // Update both chat messages and cache
+        const finalMessages = [...updatedMessages, assistantMsg];
+        setChatMessages(finalMessages);
+        setMessageCache(prev => ({
+          ...prev,
+          [currentChatId]: finalMessages
+        }));
+        
+      setIsProcessing(false);
+    }, 1000);
+    } catch (error) {
+      console.error("Error sending message:", error);
+      toast.error("Failed to send message");
+      setIsProcessing(false);
+    }
+  };
+
+  const handleNewChat = async () => {
+    // Find the active project
+    const activeProject = projects.find(p => p.expanded);
+    
+    if (!activeProject) {
+      toast.error("Please create or select a project first");
+      return;
+    }
+    
+    // Create a new chat in the active project
+    await handleCreateChat(activeProject.id);
+  };
+
+  const handleClearChat = async () => {
+    // Get selected chat ID
+    const selectedChat = chatHistory.find(c => c.selected);
+    if (!selectedChat) return;
+    
+    try {
+      // Get all messages for this chat
+      const messagesRef = collection(db, 'playground_messages');
+      const q = query(
+        messagesRef,
+        where('chatId', '==', selectedChat.id)
+      );
+      
+      const querySnapshot = await getDocs(q);
+      
+      // Create a batch for performance
+      const batch = writeBatch(db);
+      
+      // Add delete operations to batch
+      querySnapshot.docs.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      
+      // Commit the batch
+      await batch.commit();
+      
+      // Clear local state and cache
+    setChatMessages([]);
+      setMessageCache(prev => ({
+        ...prev,
+        [selectedChat.id]: []
+      }));
+      
+      toast.success("Chat cleared successfully");
+    } catch (error) {
+      console.error("Error clearing chat:", error);
+      toast.error("Failed to clear chat");
+    }
+  };
+
+  const handleSaveChat = async () => {
+    // Get selected chat ID
+    const selectedChat = chatHistory.find(c => c.selected);
+    if (!selectedChat) {
+      toast.error("No chat selected to save");
+      return;
+    }
+    
+    try {
+      // Update the chat in Firebase to mark it as saved
+      const chatRef = doc(db, 'playground_chats', selectedChat.id);
+      await updateDoc(chatRef, { 
+        saved: true,
+        lastSavedAt: serverTimestamp()
+      });
+      
+      // Update local state
+      setChatHistory(prev => 
+        prev.map(chat => 
+          chat.id === selectedChat.id 
+            ? { ...chat, saved: true, lastSavedAt: new Date() } 
+            : chat
+        )
+      );
+      
+      toast.success("Chat saved successfully");
+    } catch (error) {
+      console.error("Error saving chat:", error);
+      toast.error("Failed to save chat");
+    }
+  };
+
+  const handleChatSelect = async (chatId) => {
+    // Skip if already selected
+    const currentSelected = chatHistory.find(c => c.selected);
+    if (currentSelected?.id === chatId) return;
+    
+    // Find the chat to select 
+    const chatToSelect = chatHistory.find(c => c.id === chatId);
+    if (!chatToSelect) return;
+    
+    // Track the current chat ID
+    setCurrentChatId(chatId);
+    
+    // Mark that chat as selected
+    setChatHistory((prev) =>
+      prev.map((c) => ({
+        ...c,
+        selected: c.id === chatId
+      }))
+    );
+    
+    // Fetch messages for this chat
+    await fetchMessages(chatId);
+  };
+
+  // Expand/collapse a project
+  const toggleProject = async (projectId) => {
+    const projectToToggle = projects.find(p => p.id === projectId);
+    
+    if (!projectToToggle) return;
+    
+    // If already expanded, just collapse it
+    if (projectToToggle.expanded) {
+    setProjects((prev) =>
+      prev.map((p) =>
+          p.id === projectId ? { ...p, expanded: false } : p
+        )
+      );
+      return;
+    }
+    
+    // Otherwise collapse all projects first, then expand the selected one
+    setProjects((prev) =>
+      prev.map((p) =>
+        p.id === projectId ? { ...p, expanded: true } : { ...p, expanded: false }
+      )
+    );
+    
+    // Fetch chats for this project
+    await fetchChats(projectId);
+  };
+
+  // Focus new project input when shown
+  useEffect(() => {
+    if (showNewProjectInput && newProjectInputRef.current) {
+      newProjectInputRef.current.focus();
+    }
+  }, [showNewProjectInput]);
+
+  //
+  // 4) Scroll to bottom of chat on new messages
+  //
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
+  // Add function to delete a project
+  const handleDeleteProject = async (projectId) => {
+    if (!userId || !projectId) return;
+    
+    try {
+      // Set deleting state
+      setDeleteConfirmation(prev => ({
+        ...prev,
+        isDeleting: true
+      }));
+      
+      // Get all chats for this project first
+      const chatsRef = collection(db, 'playground_chats');
+      const chatsQuery = query(
+        chatsRef,
+        where('userId', '==', userId),
+        where('projectId', '==', projectId)
+      );
+      
+      const chatsSnapshot = await getDocs(chatsQuery);
+      const chatIds = chatsSnapshot.docs.map(doc => doc.id);
+      
+      // Get all messages for these chats
+      const messagesPromises = chatIds.map(async (chatId) => {
+        const messagesRef = collection(db, 'playground_messages');
+        const messagesQuery = query(
+          messagesRef,
+          where('chatId', '==', chatId)
+        );
+        return getDocs(messagesQuery);
+      });
+      
+      const messagesSnapshots = await Promise.all(messagesPromises);
+      
+      // Create a batch for all deletions
+      const batch = writeBatch(db);
+      
+      // Add all messages to batch delete
+      messagesSnapshots.forEach(snapshot => {
+        snapshot.docs.forEach(doc => {
+          batch.delete(doc.ref);
+        });
+      });
+      
+      // Add all chats to batch delete
+      chatsSnapshot.docs.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      
+      // Add project to batch delete
+      const projectRef = doc(db, 'playground_projects', projectId);
+      batch.delete(projectRef);
+      
+      // Commit all deletes in one batch
+      await batch.commit();
+      
+      // Update local state to remove the project
+      setProjects(prev => prev.filter(p => p.id !== projectId));
+      
+      // If this was the expanded project, clear chat history
+      if (projects.find(p => p.id === projectId && p.expanded)) {
+        setChatHistory([]);
+        setChatMessages([]);
+      }
+      
+      toast.success("Project deleted successfully");
+      
+      // Close confirmation dialog
+      setDeleteConfirmation({
+        isOpen: false,
+        type: null,
+        itemId: null,
+        itemName: '',
+        isDeleting: false
+      });
+    } catch (error) {
+      console.error("Error deleting project:", error);
+      toast.error("Failed to delete project");
+      
+      // Reset deleting state
+      setDeleteConfirmation(prev => ({
+        ...prev,
+        isDeleting: false
+      }));
+    }
+  };
+
+  // Add function to delete a chat
+  const handleDeleteChat = async (chatId) => {
+    if (!userId || !chatId) return;
+    
+    try {
+      // Set deleting state
+      setDeleteConfirmation(prev => ({
+        ...prev,
+        isDeleting: true
+      }));
+      
+      // Get all messages for this chat
+      const messagesRef = collection(db, 'playground_messages');
+      const messagesQuery = query(
+        messagesRef,
+        where('chatId', '==', chatId)
+      );
+      
+      const messagesSnapshot = await getDocs(messagesQuery);
+      
+      // Create a batch for all deletions
+      const batch = writeBatch(db);
+      
+      // Add all messages to batch delete
+      messagesSnapshot.docs.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      
+      // Add chat to batch delete
+      const chatRef = doc(db, 'playground_chats', chatId);
+      batch.delete(chatRef);
+      
+      // Commit all deletes in one batch
+      await batch.commit();
+      
+      // Update local state
+      const deletedChat = chatHistory.find(c => c.id === chatId);
+      const wasSelected = deletedChat?.selected;
+      
+      // Remove from chat history
+      setChatHistory(prev => {
+        const filtered = prev.filter(c => c.id !== chatId);
+        
+        // If this was the selected chat, select another one if available
+        if (wasSelected && filtered.length > 0) {
+          filtered[0].selected = true;
+          
+          // Also load the messages for the newly selected chat
+          fetchMessages(filtered[0].id);
+        } else if (wasSelected) {
+          // If there are no chats left, clear messages
+          setChatMessages([]);
+        }
+        
+        return filtered;
+      });
+      
+      // If this was the selected chat, clear message cache
+      if (wasSelected) {
+        setMessageCache(prev => {
+          const newCache = { ...prev };
+          delete newCache[chatId];
+          return newCache;
+        });
+      }
+      
+      toast.success("Chat deleted successfully");
+      
+      // Close confirmation dialog
+      setDeleteConfirmation({
+        isOpen: false,
+        type: null,
+        itemId: null,
+        itemName: '',
+        isDeleting: false
+      });
+    } catch (error) {
+      console.error("Error deleting chat:", error);
+      toast.error("Failed to delete chat");
+      
+      // Reset deleting state
+      setDeleteConfirmation(prev => ({
+        ...prev,
+        isDeleting: false
+      }));
+    }
+  };
+
+  // Add function to show confirmation dialog
+  const showDeleteConfirmation = (type, id, name) => {
+    setDeleteConfirmation({
+      isOpen: true,
+      type,
+      itemId: id,
+      itemName: name
+    });
+  };
+
+  // Add function to handle confirmation
+  const handleConfirmDelete = () => {
+    const { type, itemId } = deleteConfirmation;
+    
+    if (type === 'project') {
+      handleDeleteProject(itemId);
+    } else if (type === 'chat') {
+      handleDeleteChat(itemId);
+    }
+  };
+
+  // Add function to cancel deletion
+  const cancelDelete = () => {
+    setDeleteConfirmation({
+      isOpen: false,
+      type: null,
+      itemId: null,
+      itemName: '',
+      isDeleting: false
+    });
+  };
+
+  // Add resize handlers
+  useEffect(() => {
+    const handleLeftResize = (e) => {
+      if (!leftResizeRef.current?.dataset.resizing) return;
+      
+      const newWidth = Math.max(150, Math.min(400, e.clientX));
+      setPanelSizes(prev => ({
+        ...prev,
+        left: newWidth
+      }));
+    };
+    
+    const handleRightResize = (e) => {
+      if (!rightResizeRef.current?.dataset.resizing) return;
+      if (!rightPanelExpanded) return;
+      
+      const containerWidth = document.querySelector('.flex.w-full.h-full')?.clientWidth || 1200;
+      const newRightWidth = Math.max(250, Math.min(500, containerWidth - e.clientX));
+      setPanelSizes(prev => ({
+        ...prev,
+        right: newRightWidth
+      }));
+    };
+    
+    const handleMouseUp = () => {
+      if (leftResizeRef.current) {
+        leftResizeRef.current.dataset.resizing = '';
+      }
+      if (rightResizeRef.current) {
+        rightResizeRef.current.dataset.resizing = '';
+      }
+      document.body.style.cursor = 'default';
+      document.body.style.userSelect = '';
+    };
+    
+    document.addEventListener('mousemove', handleLeftResize);
+    document.addEventListener('mousemove', handleRightResize);
+    document.addEventListener('mouseup', handleMouseUp);
+    
+    return () => {
+      document.removeEventListener('mousemove', handleLeftResize);
+      document.removeEventListener('mousemove', handleRightResize);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [rightPanelExpanded]);
+
+  // Update rightPanelExpanded effect to adjust panel size
+  useEffect(() => {
+    setPanelSizes(prev => ({
+      ...prev,
+      right: rightPanelExpanded ? 288 : 40
+    }));
+  }, [rightPanelExpanded]);
+
+  // Function to toggle library expansion
+  const toggleLibrary = (libraryId) => {
+    setExpandedLibraries(prev => 
+      prev.includes(libraryId) 
+        ? prev.filter(id => id !== libraryId) 
+        : [...prev, libraryId]
+    );
+  };
+
+  // Add state for library creation popup
+  const [showLibraryModal, setShowLibraryModal] = useState(false);
+  const [newLibraryName, setNewLibraryName] = useState('');
+  const [libraryDocuments, setLibraryDocuments] = useState([]);
+  
+  // Track library limits
+  const maxLibraries = 3;
+  const maxDocumentsPerLibrary = 5;
+
+  // Use Firebase for user libraries instead of dummy data
+  const [userLibraries, setUserLibraries] = useState([]);
+  const [loadingLibraries, setLoadingLibraries] = useState(false);
+
+  // Fetch user libraries from Firestore
+  const fetchUserLibraries = async (userIdParam) => {
+    const currentUserId = userIdParam || userId;
+    if (!currentUserId) return;
+    
+    setLoadingLibraries(true);
+    try {
+      const librariesRef = collection(db, 'user_libraries');
+      const q = query(
+        librariesRef,
+        where('userId', '==', currentUserId),
+        orderBy('createdAt', 'desc')
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const fetchedLibraries = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        documents: doc.data().documents || []
+      }));
+      
+      setUserLibraries(fetchedLibraries);
+      
+      // Expand first library by default if available
+      if (fetchedLibraries.length > 0 && !expandedLibraries.includes(fetchedLibraries[0].id)) {
+        setExpandedLibraries(prev => [...prev, fetchedLibraries[0].id]);
+      }
+    } catch (error) {
+      console.error("Error fetching libraries:", error);
+      toast.error("Failed to load document libraries");
+    } finally {
+      setLoadingLibraries(false);
+    }
+  };
+
+  // Function to handle document uploads
+  const handleFileUpload = (files) => {
+    // Convert FileList to Array and filter out non-document files
+    const fileArray = Array.from(files).filter(file => {
+      // Allow PDFs, Word docs, text files, etc.
+      const validTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'text/plain'];
+      return validTypes.includes(file.type);
+    });
+    
+    // Check if adding new files would exceed the maximum
+    if (libraryDocuments.length + fileArray.length > maxDocumentsPerLibrary) {
+      toast.error(`You can only add up to ${maxDocumentsPerLibrary} documents per library.`);
+      return;
+    }
+    
+    // Add files to state
+    setLibraryDocuments(prev => [...prev, ...fileArray]);
+  };
+
+  // Function to add document to an existing library
+  const handleAddDocumentToLibrary = async (libraryId, files) => {
+    if (!userId || !libraryId) return;
+    
+    const library = userLibraries.find(lib => lib.id === libraryId);
+    if (!library) return;
+    
+    // Check if adding would exceed the maximum
+    if (library.documents.length >= maxDocumentsPerLibrary) {
+      toast.error(`This library already has the maximum of ${maxDocumentsPerLibrary} documents.`);
+      return;
+    }
+
+    // Convert FileList to Array 
+    const fileArray = Array.from(files);
+    
+    // Check if adding these files would exceed the maximum
+    if (library.documents.length + fileArray.length > maxDocumentsPerLibrary) {
+      toast.error(`Cannot add ${fileArray.length} documents. You can only add ${maxDocumentsPerLibrary - library.documents.length} more.`);
+      return;
+    }
+    
+    try {
+      // Create document metadata
+      const newDocuments = fileArray.map(file => ({
+        id: `doc-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        createdAt: new Date(),
+        // Here you would add vector embedding data once processed
+        vectorized: false
+      }));
+      
+      // Update the library document in Firestore
+      const libraryRef = doc(db, 'user_libraries', libraryId);
+      await updateDoc(libraryRef, {
+        documents: [...library.documents, ...newDocuments],
+        documentCount: library.documents.length + newDocuments.length,
+        updatedAt: serverTimestamp()
+      });
+      
+      // Update local state
+      setUserLibraries(prev => 
+        prev.map(lib => 
+          lib.id === libraryId 
+            ? { 
+                ...lib, 
+                documents: [...lib.documents, ...newDocuments],
+                documentCount: lib.documents.length + newDocuments.length,
+                updatedAt: new Date()
+              }
+            : lib
+        )
+      );
+      
+      toast.success(`Added ${newDocuments.length} document(s) to ${library.name}`);
+    } catch (error) {
+      console.error("Error adding documents to library:", error);
+      toast.error("Failed to add documents");
+    }
+  };
+  
+  // Function to handle library creation with Firestore integration
+  const handleCreateLibrary = async () => {
+    if (!userId || !newLibraryName.trim()) return;
+    
+    // Check if maximum libraries reached
+    if (userLibraries.length >= maxLibraries) {
+      toast.error(`You can only have a maximum of ${maxLibraries} libraries.`);
+      return;
+    }
+    
+    try {
+      // Prepare the documents array 
+      const documents = libraryDocuments.map(file => ({
+        id: `doc-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+        name: file.name,
+        size: file.size,
+        createdAt: new Date(),
+        type: file.type,
+        // Here you would add vector embedding data once processed
+        vectorized: false
+      }));
+      
+      // Create library document in Firestore
+      const libraryData = {
+        userId,
+        name: newLibraryName.trim(),
+        color: ['indigo', 'green', 'amber', 'blue', 'red'][Math.floor(Math.random() * 5)],
+        documents: documents,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        documentCount: documents.length
+      };
+      
+      const docRef = await addDoc(collection(db, 'user_libraries'), libraryData);
+      
+      // Add the new library to local state with proper ID from Firestore
+      const newLibrary = {
+        id: docRef.id,
+        ...libraryData,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+      
+      setUserLibraries(prev => [newLibrary, ...prev]);
+      
+      // Expand the new library
+      setExpandedLibraries(prev => [...prev, docRef.id]);
+      
+      // Handle file uploads to storage here (if needed)
+      // For now, we're just storing metadata
+      
+      // Reset state and close modal
+      toast.success('Library created successfully!');
+      setShowLibraryModal(false);
+      setNewLibraryName('');
+      setLibraryDocuments([]);
+    } catch (error) {
+      console.error("Error creating library:", error);
+      toast.error("Failed to create library");
+    }
+  };
+  
+  // Function to handle drag-and-drop
+  // Function to handle drag-and-drop
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFileUpload(e.dataTransfer.files);
+    }
+  };
+  
+  // Function to handle file input change
+  const handleFileInputChange = (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      handleFileUpload(e.target.files);
+    }
+  };
+  
+  //
+  // 5) Render the Playground UI
+  //
+  return (
+    <div className="flex w-full h-full">
+      {/* --------------------------------------------
+          LEFT - Chat list / Project folders panel
+      -------------------------------------------- */}
+      <div 
+        ref={leftPanelRef}
+        style={{ width: `${panelSizes.left}px` }}
+        className={`flex-shrink-0 border-r flex flex-col ${
+        darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'
+        }`}
+      >
+        {/* Chat list header */}
+        <div
+          className={`
+            sticky top-0 z-10 px-4 py-3 border-b flex items-center justify-between
+            ${
+              darkMode
+                ? 'border-gray-800 bg-gray-900/95 backdrop-blur-sm'
+                : 'border-gray-200 bg-white/95 backdrop-blur-sm'
+            }
+          `}
+        >
+          {showNewProjectInput ? (
+            <div className="flex-1 flex items-center">
+              <input
+                ref={newProjectInputRef}
+                type="text"
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
+                placeholder="Project name..."
+                className={`w-full text-xs px-2 py-1 rounded-md border ${
+                  darkMode
+                    ? 'bg-gray-800 border-gray-700 text-white'
+                    : 'bg-white border-gray-300 text-gray-800'
+                }`}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleCreateProject();
+                  } else if (e.key === 'Escape') {
+                    setShowNewProjectInput(false);
+                    setNewProjectName('');
+                  }
+                }}
+              />
+              {loadingProject ? (
+                <div className="ml-2 animate-spin h-3 w-3 border-2 border-blue-500 rounded-full border-t-transparent"></div>
+              ) : (
+          <button
+                  onClick={handleCreateProject}
+                  disabled={!newProjectName.trim()}
+                  className={`ml-2 ${
+                    darkMode ? 'text-blue-400 hover:text-blue-300' : 'text-blue-600 hover:text-blue-700'
+                  } ${!newProjectName.trim() ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <Save className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
+              <button
+                onClick={() => setShowNewProjectInput(true)}
+            className={`
+                  flex items-center space-x-2 rounded-md px-2 py-1 transition-colors duration-150
+              ${
+                darkMode
+                      ? 'text-blue-400 hover:bg-blue-900/20 hover:text-blue-300'
+                      : 'text-blue-600 hover:bg-blue-50 hover:text-blue-700'
+              }
+            `}
+          >
+                <Plus className="h-3.5 w-3.5" />
+                <span className="text-xs font-medium">New Project</span>
+          </button>
+          
+              <span className={`text-xs font-semibold tracking-wide uppercase ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+            Chats
+          </span>
+            </>
+          )}
+        </div>
+
+        {/* Project folders & chat list - Fix scrolling here */}
+        <div className={`flex-1 overflow-y-auto ${darkMode ? 'bg-gray-900' : 'bg-gray-50'}`}>
+          {loading ? (
+            <div className="flex justify-center items-center h-32">
+              <div className="animate-spin h-5 w-5 border-2 border-blue-500 rounded-full border-t-transparent"></div>
+            </div>
+          ) : projects.length === 0 ? (
+            <div className="p-4 text-center">
+              <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                No projects yet. Create your first project to get started.
+              </p>
+            </div>
+          ) : (
+            projects.map((project) => (
+              <div key={project.id} className="mt-1">
+              {/* Folder row */}
+              <div
+                className={`
+                    flex items-center px-3 py-1.5 cursor-pointer transition-colors duration-150 group
+                    ${darkMode ? 'hover:bg-gray-800/70' : 'hover:bg-gray-100/70'}
+                `}
+              >
+                  <div className="flex-1 flex items-center" onClick={() => toggleProject(project.id)}>
+                <ChevronDown
+                  className={`
+                        h-3.5 w-3.5 mr-1.5 transform transition-transform duration-200
+                    ${!project.expanded ? '-rotate-90' : ''}
+                        ${darkMode ? 'text-gray-500' : 'text-gray-500'}
+                  `}
+                />
+                    <Folder className={`h-4 w-4 mr-1.5 ${project.expanded ? (darkMode ? 'text-blue-400' : 'text-blue-500') : (darkMode ? 'text-gray-500' : 'text-gray-600')}`} />
+                    <span className={`text-xs font-medium ${project.expanded ? (darkMode ? 'text-blue-400' : 'text-blue-600') : (darkMode ? 'text-gray-300' : 'text-gray-700')}`}>
+                  {project.name}
+                </span>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      showDeleteConfirmation('project', project.id, project.name);
+                    }}
+                    className={`p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity ${
+                      darkMode ? 'hover:bg-gray-700 text-gray-400 hover:text-gray-300' : 'hover:bg-gray-200 text-gray-500 hover:text-gray-700'
+                    }`}
+                    title="Delete project"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+              </div>
+
+                {/* If expanded, show the chat list inside this folder with VS Code-like tree connections */}
+              {project.expanded && (
+                  <div className="relative">
+                    {/* Tree branch line */}
+                    <div className={`absolute left-[19px] top-0 bottom-0 w-px ${darkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+                    
+                    {chatHistory.length === 0 ? (
+                      <div className="pl-10 pr-2 py-2">
+                        <p className={`text-[10px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                          No chats yet
+                        </p>
+                      </div>
+                    ) : (
+                      chatHistory.map((chat, index) => (
+                        <div key={chat.id} className="relative">
+                          {/* Horizontal tree branch */}
+                          <div className={`absolute left-[19px] top-[14px] w-3 h-px ${darkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+                          
+                <div
+                  className={`
+                              flex items-center py-1.5 pl-8 pr-2 my-0.5 cursor-pointer rounded
+                              relative transition-all duration-200 group
+                        ${
+                          chat.selected
+                            ? darkMode
+                              ? 'bg-blue-900/30 border-l-2 border-blue-500'
+                              : 'bg-blue-50 border-l-2 border-blue-500'
+                            : darkMode
+                                  ? 'hover:bg-gray-800/70 hover:border-l-2 hover:border-blue-500/50 border-l-2 border-transparent'
+                                  : 'hover:bg-gray-100/70 hover:border-l-2 hover:border-blue-500/50 border-l-2 border-transparent'
+                        }
+                      `}
+                    >
+                            <div className="flex-1" onClick={() => handleChatSelect(chat.id)}>
+                        <span
+                          className={`
+                                  text-xs truncate
+                            ${
+                              chat.selected
+                                ? darkMode
+                                  ? 'text-blue-400 font-medium'
+                                  : 'text-blue-600 font-medium'
+                                : darkMode
+                                        ? 'text-gray-400'
+                                        : 'text-gray-600'
+                            }
+                          `}
+                        >
+                          {chat.name}
+                        </span>
+                      </div>
+
+                            <div className="flex items-center">
+                              {/* Delete chat button */}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  showDeleteConfirmation('chat', chat.id, chat.name);
+                                }}
+                                className={`p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity ${
+                                  darkMode ? 'hover:bg-gray-700 text-gray-400 hover:text-gray-300' : 'hover:bg-gray-200 text-gray-500 hover:text-gray-700'
+                                }`}
+                                title="Delete chat"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                              
+                              {/* Existing dropdown icon */}
+                      {chat.selected && (
+                                <ChevronDown className={`h-3.5 w-3.5 ml-1 ${darkMode ? 'text-blue-400' : 'text-blue-500'}`} />
+                      )}
+                    </div>
+                </div>
+                          
+                          {/* Last branch cap to close the tree for the last element */}
+                          {index === chatHistory.length - 1 && (
+                            <div 
+                              className={`absolute left-[19px] top-[15px] bottom-0 w-px ${darkMode ? 'bg-gray-900' : 'bg-gray-50'}`}
+                            ></div>
+              )}
+            </div>
+                      ))
+                    )}
+                    
+                    {/* Add New Chat button with tree connection */}
+                    <div className="relative">
+                      <div className={`absolute left-[19px] top-0 w-3 h-px ${darkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+                      <button 
+                        onClick={() => handleCreateChat(project.id)}
+                        disabled={loadingChat}
+                        className={`
+                          flex items-center py-1.5 pl-8 pr-2 my-1 rounded
+                          ${darkMode ? 'hover:bg-gray-800/50 text-gray-500' : 'hover:bg-gray-100/50 text-gray-500'}
+                          transition-all duration-150
+                          ${loadingChat ? 'opacity-50 cursor-wait' : ''}
+                        `}
+                      >
+                        {loadingChat ? (
+                          <div className="animate-spin h-3 w-3 border-2 border-gray-500 rounded-full border-t-transparent mr-1.5"></div>
+                        ) : (
+                          <PlusIcon className="h-3.5 w-3.5 mr-1.5" />
+                        )}
+                        <span className="text-xs">New Chat</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Resize handle for left panel */}
+      <div
+        ref={leftResizeRef}
+        className={`w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 z-10 ${
+          darkMode ? 'bg-gray-800 hover:bg-blue-600 active:bg-blue-700' : 'bg-gray-200'
+        }`}
+        onMouseDown={(e) => {
+          leftResizeRef.current.dataset.resizing = 'true';
+          document.body.style.cursor = 'col-resize';
+          document.body.style.userSelect = 'none'; // Prevent text selection during resize
+          e.preventDefault();
+        }}
+      ></div>
+
+      {/* --------------------------------------------
+          MIDDLE - Chat interface
+      -------------------------------------------- */}
+      <div ref={middlePanelRef} className="flex-1 flex flex-col overflow-hidden">
+        {/* Top navbar with model selector */}
+        <div
+          className={`
+            flex items-center py-1.5 px-3 border-b
+            ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}
+          `}
+        >
+          <div className="mx-auto relative w-full max-w-md">
+            <button
+              onClick={toggleModelDropdown}
+              className={`
+                w-full flex items-center justify-center rounded-md py-1 px-4
+                ${darkMode
+                  ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                  : 'bg-indigo-500 hover:bg-indigo-600 text-white'
+                }
+              `}
+            >
+              <span className="text-xs font-medium mr-1">
+                {playgroundModel?.name || 'meta-llama-3.1-8b-instruct'}
+              </span>
+              <ChevronDown className="h-3 w-3" />
+            </button>
+
+            {/* Model Selection Dropdown */}
+            {modelDropdownVisible && (
+              <div 
+                ref={modelDropdownRef}
+                className={`
+                  absolute top-full left-0 right-0 mt-1 z-50 border rounded-md shadow-lg
+                  ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'}
+                `}
+                style={{ width: '100%' }}
+              >
+                <div className="text-center font-medium py-2 border-b border-gray-700">Select Model</div>
+                
+                {/* Filter and dropdown row */}
+                <div className="flex mx-2 mb-2">
+                  <div className="flex-1 relative">
+                    <button
+                      id="model-type-button"
+                      onClick={toggleModelTypeDropdown}
+                      className={`
+                        w-full flex items-center justify-center rounded-l border p-1 text-center text-xs
+                        ${darkMode ? 'border-gray-700 bg-gray-900 text-white' : 'border-gray-300 bg-gray-50 text-gray-800'}
+                      `}
+                    >
+                      <span className="flex-1 text-center">
+                        {modelTypes.find(t => t.id === modelTypeFilter)?.name || 'All Models'}
+                      </span>
+                      <ChevronDown className="h-3 w-3 ml-1" />
+                    </button>
+                    
+                    {/* Model Type Dropdown */}
+                    {showModelTypeDropdown && (
+                      <div 
+                        ref={modelTypeDropdownRef}
+                        className={`
+                          absolute top-full left-0 right-0 mt-1 z-50 border rounded-md shadow-lg overflow-hidden
+                          ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'}
+                        `}
+                      >
+                        {modelTypes.map(type => (
+                          <div 
+                            key={type.id}
+                            onClick={() => selectModelType(type.id)}
+                            className={`
+                              p-2 text-xs cursor-pointer
+                              ${darkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}
+                              ${modelTypeFilter === type.id ? (darkMode ? 'bg-gray-700' : 'bg-gray-200') : ''}
+                            `}
+                          >
+                            {type.name}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  
+                  <div className={`
+                    flex-1 border-r border-t border-b rounded-r p-1 text-center text-xs
+                    ${darkMode ? 'border-gray-700 bg-gray-900 text-gray-300' : 'border-gray-300 bg-gray-50 text-gray-700'}
+                  `}>
+                    Filter Model Type
+                  </div>
+                </div>
+                
+                {/* Search input */}
+                <div className="flex mx-2 mb-2">
+                  <div className={`
+                    flex-1 border rounded-l p-1
+                    ${darkMode ? 'border-gray-700 bg-gray-900' : 'border-gray-300 bg-gray-50'}
+                  `}>
+                    <input 
+                      type="text" 
+                      className={`
+                        w-full bg-transparent outline-none text-xs
+                        ${darkMode ? 'text-white placeholder-gray-500' : 'text-gray-800 placeholder-gray-400'}
+                      `}
+                      placeholder="Search Model Name"
+                      value={modelSearchQuery}
+                      onChange={(e) => setModelSearchQuery(e.target.value)}
+                    />
+                  </div>
+                  <div className={`
+                    border-r border-t border-b rounded-r p-1 px-3 text-center text-xs
+                    ${darkMode ? 'border-gray-700 bg-gray-900 text-gray-300' : 'border-gray-300 bg-gray-50 text-gray-700'}
+                  `}>
+                    Search
+                  </div>
+                </div>
+                
+                {/* Model list - Scrollable */}
+                <div className="overflow-y-auto mx-2 mb-2" style={{ maxHeight: '280px' }}>
+                  {filteredModels.length > 0 ? (
+                    filteredModels.map((model) => {
+                      const deployed = isModelDeployed(model.id);
+                      return (
+                        <div 
+                          key={model.id}
+                          className={`
+                            flex items-center justify-between p-2 border-b
+                            ${darkMode ? 'border-gray-700 hover:bg-gray-700' : 'border-gray-200 hover:bg-gray-50'}
+                          `}
+                        >
+                          <div className="flex flex-col">
+                            <div className={`text-sm ${darkMode ? 'text-blue-400' : 'text-blue-600'}`}>
+                              {model.name}
+                            </div>
+                            {model.parameters && (
+                              <div className="text-xs text-gray-500">{model.parameters} params</div>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => deployed ? selectModel(model) : handleDeployModel(model)}
+                            className={`
+                              px-3 py-1 text-xs font-medium rounded
+                              ${deployed 
+                                ? darkMode 
+                                  ? 'bg-gray-700 hover:bg-gray-600 text-gray-300' 
+                                  : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
+                                : darkMode
+                                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                                  : 'bg-blue-500 hover:bg-blue-600 text-white'
+                              }
+                            `}
+                          >
+                            {deployed ? 'Select' : 'Deploy'}
+                          </button>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="p-4 text-center text-sm text-gray-500">
+                      No models found matching your filters
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Second header row with chat title and options */}
+        <div
+          className={`
+            flex items-center justify-between px-3 py-1.5 border-b
+            ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}
+          `}
+        >
+          <div className="text-xs font-medium">
+            {chatHistory.find(c => c.selected)?.name || 'No chat selected'}
+          </div>
+
+          <div className="flex items-center space-x-4">
+            <button
+              onClick={handleNewChat}
+              className={`py-0.5 text-xs ${darkMode ? 'text-gray-400 hover:text-gray-300' : 'text-gray-600 hover:text-gray-800'}`}
+>
+  <span className="flex items-center">
+    <PlusIcon className="h-3.5 w-3.5 mr-1" />
+    New Chat
+  </span>
+</button>
+
+            <button
+              onClick={handleClearChat}
+              disabled={!chatHistory.find(c => c.selected) || chatMessages.length === 0}
+              className={`py-0.5 text-xs ${
+                !chatHistory.find(c => c.selected) || chatMessages.length === 0
+                  ? 'opacity-50 cursor-not-allowed'
+                  : ''
+              } ${darkMode ? 'text-gray-400 hover:text-gray-300' : 'text-gray-600 hover:text-gray-800'}`}
+            >
+              <span className="flex items-center">
+                <svg className="h-3.5 w-3.5 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                Clear Chat
+              </span>
+            </button>
+
+            <button
+              onClick={handleSaveChat}
+              disabled={!chatHistory.find(c => c.selected) || chatMessages.length === 0}
+              className={`py-0.5 text-xs ${
+                !chatHistory.find(c => c.selected) || chatMessages.length === 0
+                  ? 'opacity-50 cursor-not-allowed'
+                  : ''
+              } ${darkMode ? 'text-gray-400 hover:text-gray-300' : 'text-gray-600 hover:text-gray-800'}`}
+            >
+              <span className="flex items-center">
+                <Save className="h-3.5 w-3.5 mr-1" />
+                Save Chat
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Chat content */}
+        <div className={`flex-1 overflow-y-auto ${darkMode ? 'bg-gray-900' : 'bg-white'}`}>
+          <div className="max-w-3xl mx-auto px-4 py-4">
+            {isProcessing && chatMessages.length === 0 ? (
+              <div className="flex justify-center items-center h-32">
+                <div className="animate-spin h-5 w-5 border-2 border-blue-500 rounded-full border-t-transparent"></div>
+              </div>
+            ) : chatMessages.length > 0 ? (
+              chatMessages.map((msg, idx) => {
+              const isAssistant = msg.role === 'assistant';
+              return (
+                <div key={idx} className="mb-6">
+                  <div className="flex items-center mb-2">
+                    <span
+                      className={`
+                        text-sm font-medium
+                        ${darkMode ? 'text-gray-300' : 'text-gray-700'}
+                      `}
+                    >
+                      {isAssistant ? 'Assistant' : 'User'}
+                    </span>
+                    {isAssistant && (
+                      <span
+                        className={`
+                          text-[10px] ml-2 px-1.5 py-0.5 rounded
+                          ${darkMode ? 'bg-gray-800 text-gray-400' : 'bg-gray-200 text-gray-600'} 
+                          font-mono
+                        `}
+                      >
+                        {msg.model || 'meta-llama-3.1-8b-instruct'}
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    className={`
+                      mt-2
+                      ${darkMode ? 'text-gray-200' : 'text-gray-800'}
+                    `}
+                  >
+                    <div className="text-sm whitespace-pre-wrap">
+                      {isAssistant && msg.content.includes('Implementation') ? (
+                        <>
+                          <h3 className="text-lg font-medium mb-4">Implementation</h3>
+                          <div className="relative group">
+                            <pre className={`p-4 rounded-md overflow-x-auto ${darkMode ? 'bg-gray-800' : 'bg-gray-100'}`}>
+                              <code className="text-sm font-mono">
+                                {`#include <iostream>
+#include <fstream>
+#include <string>
+#include <map>
+
+// Forward declarations
+class FileSystem;
+class Directory;
+class File;
+
+// Abstract base class for File System components (Directory/File)
+class FileSystemComponent {
+public:
+    virtual ~FileSystemComponent() {}`}
+                              </code>
+                            </pre>
+                            <button className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <Copy className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        msg.content
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+              })
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center py-12">
+                <div className={`text-center p-6 rounded-lg ${darkMode ? 'bg-gray-800' : 'bg-gray-50'} max-w-md`}>
+                  <div className="mb-3">
+                    <svg className={`h-12 w-12 mx-auto ${darkMode ? 'text-gray-600' : 'text-gray-400'}`} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    </svg>
+                  </div>
+                  <h3 className={`text-lg font-medium mb-1 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                    No messages yet
+                  </h3>
+                  <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {chatHistory.find(c => c.selected) 
+                      ? 'Start a conversation by typing a message below'
+                      : 'Select a chat from the sidebar or create a new one'}
+                  </p>
+                  {!chatHistory.find(c => c.selected) && (
+                    <button
+                      onClick={handleNewChat}
+                      className={`mt-4 px-4 py-2 rounded text-sm font-medium
+                        ${darkMode ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                    >
+                      <span className="flex items-center justify-center">
+                        <PlusIcon className="h-4 w-4 mr-1.5" />
+                        New Chat
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* The 'scroll to bottom' reference */}
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        {/* Input area */}
+        <div
+          className={`
+            px-4 py-3 border-t
+            ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}
+          `}
+        >
+          <div className="max-w-3xl mx-auto">
+            <div className="relative">
+              <textarea
+                value={userInput}
+                onChange={(e) => setUserInput(e.target.value)}
+                placeholder="Type a message and press Enter to send..."
+                rows="1"
+                className={`
+                  w-full p-2.5 pl-3 rounded-md border resize-none
+                  ${
+                    darkMode
+                      ? 'bg-gray-800 border-gray-700 focus:border-blue-500 text-gray-200 placeholder-gray-500'
+                      : 'bg-white border-gray-300 focus:border-blue-400 text-gray-800 placeholder-gray-400'
+                  }
+                  focus:outline-none focus:ring-1 focus:ring-blue-500 text-sm
+                `}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage();
+                  }
+                }}
+              />
+            </div>
+
+            <div className="flex justify-between items-center mt-1.5">
+              <div className="flex items-center">
+                <span className="text-xs text-gray-500">User (Ctrl + U)</span>
+                <button className="ml-2 opacity-70">
+                  <Link className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              <div className="flex items-center">
+                <span className="text-xs text-gray-500 mr-2">
+                  {isProcessing ? 'Processing...' : 'Insert (Ctrl + I)'}
+                </span>
+                <button
+                  onClick={handleSendMessage}
+                  disabled={userInput.trim() === '' || isProcessing}
+                  className={`
+                    px-2 py-1 rounded text-xs font-medium
+                    ${(userInput.trim() === '' || isProcessing) ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90'}
+                    ${darkMode ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white'}
+                  `}
+                >
+                  {isProcessing ? (
+                    <span className="flex items-center">
+                      <svg className="animate-spin -ml-1 mr-2 h-3 w-3 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Processing
+                    </span>
+                  ) : (
+                    'Send'
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-1.5 text-center">
+              <span className="text-[10px] text-gray-500 font-mono">
+                Token Usage: 100/1500
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Resize handle for right panel */}
+      {rightPanelExpanded && (
+        <div
+          ref={rightResizeRef}
+          className={`w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 z-10 ${
+            darkMode ? 'bg-gray-800 hover:bg-blue-600 active:bg-blue-700' : 'bg-gray-200'
+          }`}
+          onMouseDown={(e) => {
+            rightResizeRef.current.dataset.resizing = 'true';
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none'; // Prevent text selection during resize
+            e.preventDefault();
+          }}
+        ></div>
+      )}
+
+      {/* --------------------------------------------
+          RIGHT - Configuration panel (UPDATED)
+      -------------------------------------------- */}
+      <div 
+        ref={rightPanelRef}
+        style={{ width: `${panelSizes.right}px` }}
+        className={`transition-all duration-300 border-l flex flex-col overflow-hidden ${
+        darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'
+      }`}>
+        <div className="p-3 border-b flex items-center justify-between">
+          {rightPanelExpanded ? (
+            <>
+          <span className="text-sm font-medium">
+            <span className={`inline-flex items-center ${darkMode ? 'text-indigo-400' : 'text-indigo-600'}`}>
+              <Folder className="w-4 h-4 mr-1.5" />
+              Document Library
+            </span>
+          </span>
+              <button 
+                onClick={() => setRightPanelExpanded(false)}
+                className={`p-1 rounded-md ${darkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
+              >
+                <svg className="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                </svg>
+              </button>
+            </>
+          ) : (
+            <button 
+              onClick={() => setRightPanelExpanded(true)}
+              className={`mx-auto p-1 rounded-md ${darkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
+              title="Expand Library Panel"
+            >
+              <svg className="h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+              </svg>
+            </button>
+          )}
+        </div>
+
+        {rightPanelExpanded && (
+          <>
+        <div className="flex-1 overflow-y-auto">
+          <div className="p-3">
+            {/* Library Search */}
+            <div className="mb-4">
+              <div className={`flex items-center w-full rounded-md border mb-2 ${
+                darkMode ? 'border-gray-700 bg-gray-800' : 'border-gray-300 bg-white'
+              }`}>
+                <input
+                  type="text"
+                  placeholder="Search documents..."
+                  className={`w-full py-1.5 px-3 text-xs rounded-md border-0 outline-none ${
+                    darkMode ? 'bg-gray-800 text-gray-200 placeholder-gray-500' : 'bg-white text-gray-800 placeholder-gray-400'
+                  }`}
+                />
+                <button className={`px-3 py-1.5 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                  <svg className="h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </button>
+              </div>
+              
+              {/* Create New Library Button */}
+              <button 
+                onClick={() => {
+                  if (userLibraries.length >= maxLibraries) {
+                    toast.error(`You can only have a maximum of ${maxLibraries} libraries.`);
+                    return;
+                  }
+                  setShowLibraryModal(true);
+                }}
+                className={`w-full flex items-center justify-center py-1.5 px-3 rounded-md text-xs font-medium
+                  ${darkMode ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 'bg-indigo-500 hover:bg-indigo-600 text-white'}
+                  ${userLibraries.length >= maxLibraries ? 'opacity-50' : ''}`}
+              >
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                Create New Library
+              </button>
+            </div>
+
+            {/* My Libraries Section */}
+            <div className="mb-3">
+              <div className="flex items-center justify-between mb-1">
+                <span className={`text-xs font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                  MY LIBRARIES
+                </span>
+                <span className={`text-[9px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                  {userLibraries.length}/{maxLibraries}
+                </span>
+              </div>
+              
+              <div className="space-y-0.5">
+                {loadingLibraries ? (
+                  <div className="flex flex-col items-center justify-center py-4">
+                    <div className="animate-spin h-5 w-5 border-2 border-indigo-500 rounded-full border-t-transparent mb-2"></div>
+                    <span className="text-xs text-gray-500">Loading libraries...</span>
+                  </div>
+                ) : userLibraries.length === 0 ? (
+                  <div className="p-3 text-center">
+                    <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                      No libraries yet. Create your first library to get started.
+                    </p>
+                  </div>
+                ) : (
+                  userLibraries.map(library => (
+                    <div key={library.id}>
+                      <div 
+                        className={`py-1 px-1.5 rounded-md ${
+                          darkMode ? 'bg-gray-800 hover:bg-gray-700' : 'bg-gray-50 hover:bg-gray-100'
+                        } cursor-pointer group transition-colors`}
+                        onClick={() => toggleLibrary(library.id)}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center">
+                            <ChevronDown className={`h-3 w-3 mr-1 transform transition-transform duration-200 ${
+                              !expandedLibraries.includes(library.id) ? '-rotate-90' : ''
+                            } ${
+                              darkMode ? 'text-gray-500' : 'text-gray-500'
+                            }`} />
+                            <Folder className={`h-3.5 w-3.5 mr-1.5 ${darkMode ? `text-${library.color}-400` : `text-${library.color}-500`}`} />
+                            <span className="text-[11px] font-medium">{library.name}</span>
+                          </div>
+                          <input 
+                            type="file" 
+                            id={`add-to-library-${library.id}`} 
+                            className="hidden" 
+                            multiple 
+                            accept=".pdf,.doc,.docx,.txt"
+                            onChange={(e) => {
+                              if (e.target.files && e.target.files.length > 0) {
+                                handleAddDocumentToLibrary(library.id, e.target.files);
+                              }
+                            }}
+                          />
+                          <label
+                            htmlFor={`add-to-library-${library.id}`}
+                            className={`p-0.5 rounded ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-200 text-gray-600'}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (library.documents.length >= maxDocumentsPerLibrary) {
+                                e.preventDefault();
+                                toast.error(`This library already has the maximum of ${maxDocumentsPerLibrary} documents.`);
+                              }
+                            }}
+                          >
+                            <Plus className="h-2.5 w-2.5" />
+                          </label>
+                        </div>
+                      </div>
+                      
+                      {/* Files inside Library - Only show when expanded */}
+                      {expandedLibraries.includes(library.id) && (
+                        <div className="pl-5 mt-0.5 space-y-0.5 relative">
+                          {/* Tree branch line */}
+                          <div className={`absolute left-[14px] top-0 bottom-0 w-px ${darkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+                          
+                          {/* Documents */}
+                          {library.documents.length === 0 ? (
+                            <div className="py-2 text-center">
+                              <p className={`text-[10px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                                No documents in this library
+                              </p>
+                            </div>
+                          ) : (
+                            library.documents.map((doc) => (
+                              <div key={doc.id} className="relative">
+                                {/* Horizontal tree branch */}
+                                <div className={`absolute left-[-8px] top-[8px] w-2 h-px ${darkMode ? 'bg-gray-700' : 'bg-gray-300'}`}></div>
+                                
+                                <div className={`py-0.5 px-1.5 rounded-md ${
+                                  darkMode ? 'bg-gray-800 hover:bg-gray-700' : 'bg-gray-50 hover:bg-gray-100'
+                                } cursor-pointer group transition-colors`}>
+                                  <div className="flex items-center justify-between">
+                                    <span className={`text-[10px] ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                                      {doc.name}
+                                    </span>
+                                    <span className="text-[9px] text-gray-500">{(doc.size / (1024 * 1024)).toFixed(1)} MB</span>
+                                  </div>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                          
+                          {/* Document count indicator */}
+                          <div className="mt-1 text-[9px] text-right text-gray-500">
+                            {library.documents.length}/{maxDocumentsPerLibrary} documents
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+          </>
+        )}
+      </div>
+      
+      {/* Confirmation Dialog */}
+      {deleteConfirmation.isOpen && (
+        <div className="fixed inset-0 flex items-center justify-center z-50">
+          {/* Backdrop */}
+          <div 
+            className="absolute inset-0 bg-black bg-opacity-40 backdrop-blur-sm"
+            onClick={!deleteConfirmation.isDeleting ? cancelDelete : undefined}
+          ></div>
+          
+          {/* Modal */}
+          <div className={`relative max-w-md w-full mx-4 p-6 rounded-lg shadow-xl transform transition-all ${
+            darkMode ? 'bg-gray-800 text-gray-100' : 'bg-white text-gray-800'
+          }`}>
+            {/* Header */}
+            <div className="flex items-start justify-between mb-4">
+              <div className="flex items-center text-red-500">
+                <AlertTriangle className="h-6 w-6 mr-3" />
+                <h3 className="text-lg font-semibold">
+                  {deleteConfirmation.type === 'project' ? 'Delete Project' : 'Delete Chat'}
+                </h3>
+              </div>
+              {!deleteConfirmation.isDeleting && (
+                <button
+                  onClick={cancelDelete}
+                  className={`p-1 rounded-full ${
+                    darkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-200'
+                  }`}
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              )}
+            </div>
+            
+            {/* Content */}
+            <div className="mb-6">
+              {deleteConfirmation.isDeleting ? (
+                <div className="text-center py-4">
+                  <div className="inline-block animate-spin h-8 w-8 border-4 border-gray-300 border-t-blue-500 rounded-full mb-4"></div>
+                  <p>
+                    {deleteConfirmation.type === 'project' 
+                      ? "Deleting project and associated chats..." 
+                      : "Deleting chat and messages..."}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p className="mb-4">
+                    {deleteConfirmation.type === 'project' 
+                      ? "Are you sure you want to delete this project? This will permanently delete the project and all its chats and messages."
+                      : "Are you sure you want to delete this chat? This will permanently delete the chat and all its messages."
+                    }
+                  </p>
+                  <div className={`p-3 rounded ${
+                    darkMode ? 'bg-gray-700' : 'bg-gray-100'
+                  }`}>
+                    <span className="font-medium">&ldquo;{deleteConfirmation.itemName}&rdquo;</span>
+                    {deleteConfirmation.type === 'project' && (
+                      <p className="text-sm mt-1 text-gray-500">
+                        This action cannot be undone.
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+            
+            {/* Actions */}
+            {!deleteConfirmation.isDeleting && (
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={cancelDelete}
+                  className={`px-4 py-2 rounded text-sm ${
+                    darkMode 
+                      ? 'bg-gray-700 hover:bg-gray-600 text-gray-300' 
+                      : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
+                  }`}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmDelete}
+                  className="px-4 py-2 rounded text-sm bg-red-500 hover:bg-red-600 text-white"
+                >
+                  {deleteConfirmation.type === 'project' ? 'Delete Project' : 'Delete Chat'}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      
+      {/* Model Deploy Panel */}
+      <ModelDeployPanel 
+        darkMode={darkMode}
+        showDeployPanel={showDeployPanel}
+        setShowDeployPanel={setShowDeployPanel}
+        selectedModel={selectedModelToDeploy}
+        onDeploy={handleModelDeployed}
+      />
+
+      {/* Library Creation Modal */}
+      {showLibraryModal && (
+        <div className="fixed inset-0 flex items-center justify-center z-50">
+          {/* Backdrop */}
+          <div 
+            className="absolute inset-0 bg-black bg-opacity-40 backdrop-blur-sm"
+            onClick={() => setShowLibraryModal(false)}
+          ></div>
+          
+          {/* Modal */}
+          <div className={`relative max-w-md w-full mx-4 p-6 rounded-lg shadow-xl transform transition-all ${
+            darkMode ? 'bg-gray-800 text-gray-100' : 'bg-white text-gray-800'
+          }`}>
+            {/* Header */}
+            <div className="flex items-start justify-between mb-4">
+              <div className="flex items-center text-indigo-500">
+                <Folder className="h-6 w-6 mr-3" />
+                <h3 className="text-lg font-semibold">
+                  Create New Library
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowLibraryModal(false)}
+                className={`p-1 rounded-full ${
+                  darkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-200'
+                }`}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            
+            {/* Content */}
+            <div className="mb-6">
+              <p className={`text-sm mb-4 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                Create a new document library. You can add up to 5 documents per library, and have a maximum of 3 libraries.
+              </p>
+              
+              {/* Library Name Input */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium mb-1">Library Name</label>
+                <input 
+                  type="text"
+                  value={newLibraryName}
+                  onChange={(e) => setNewLibraryName(e.target.value)}
+                  placeholder="Enter library name..."
+                  className={`w-full px-3 py-2 text-sm border rounded-md ${
+                    darkMode 
+                      ? 'bg-gray-700 border-gray-600 text-gray-200 placeholder-gray-500'
+                      : 'bg-white border-gray-300 text-gray-800 placeholder-gray-400'
+                  }`}
+                />
+              </div>
+              
+              {/* Document Upload Section */}
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Add Documents <span className="text-xs text-gray-500">(Optional)</span>
+                </label>
+                
+                <div className={`p-3 rounded-md border ${
+                  darkMode ? 'border-gray-700 bg-gray-700' : 'border-gray-300 bg-gray-50'
+                }`}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}>
+                  <div className="text-center">
+                    <svg 
+                      className={`h-8 w-8 mx-auto mb-2 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`} 
+                      xmlns="http://www.w3.org/2000/svg" 
+                      fill="none" 
+                      viewBox="0 0 24 24" 
+                      stroke="currentColor"
+                    >
+                      <path 
+                        strokeLinecap="round" 
+                        strokeLinejoin="round" 
+                        strokeWidth={1.5} 
+                        d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" 
+                      />
+                    </svg>
+                    <p className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                      Drag & drop files here<br />or click to browse
+                    </p>
+                    <input 
+                      type="file" 
+                      id="file-upload" 
+                      className="hidden" 
+                      multiple 
+                      accept=".pdf,.doc,.docx,.txt"
+                      onChange={handleFileInputChange}
+                    />
+                    <label
+                      htmlFor="file-upload"
+                      className={`mt-3 px-4 py-1.5 rounded-md text-xs font-medium inline-block cursor-pointer
+                        ${darkMode ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'}`}
+                    >
+                      Browse Files
+                    </label>
+                  </div>
+                  
+                  {/* Selected Files List */}
+                  {libraryDocuments.length > 0 && (
+                    <div className="mt-3 border-t pt-3 space-y-2">
+                      <div className="text-xs font-medium mb-1">Selected Documents:</div>
+                      {libraryDocuments.map((doc, index) => (
+                        <div key={index} className="flex items-center justify-between text-xs py-1">
+                          <div className="flex items-center">
+                            <span className="truncate max-w-[200px]">{doc.name}</span>
+                            <span className="ml-2 text-gray-500">{(doc.size / (1024 * 1024)).toFixed(1)} MB</span>
+                          </div>
+                          <button 
+                            onClick={() => setLibraryDocuments(prev => prev.filter((_, i) => i !== index))}
+                            className="text-red-500 hover:text-red-700"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                
+                <div className="text-xs text-gray-500 mt-1 flex justify-between">
+                  <span>{libraryDocuments.length} of {maxDocumentsPerLibrary} documents selected</span>
+                  <span>You have {maxLibraries - 2} of {maxLibraries} libraries remaining</span>
+                </div>
+              </div>
+            </div>
+            
+            {/* Actions */}
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => setShowLibraryModal(false)}
+                className={`px-4 py-2 rounded text-sm ${
+                  darkMode 
+                    ? 'bg-gray-700 hover:bg-gray-600 text-gray-300' 
+                    : 'bg-gray-200 hover:bg-gray-300 text-gray-700'
+                }`}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateLibrary}
+                disabled={!newLibraryName.trim()}
+                className={`px-4 py-2 rounded text-sm ${
+                  !newLibraryName.trim() 
+                    ? 'opacity-50 cursor-not-allowed' 
+                    : ''
+                } ${
+                  darkMode 
+                    ? 'bg-indigo-600 hover:bg-indigo-700 text-white' 
+                    : 'bg-indigo-500 hover:bg-indigo-600 text-white'
+                }`}
+              >
+                Create Library
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+ModelReadbuddy.propTypes = {
+  darkMode: PropTypes.bool
+};
+
+export default ModelReadbuddy;
